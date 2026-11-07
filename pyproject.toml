@@ -18,4 +18,4 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.11"
 strict = true
 ignore_missing_imports = true
-files = ["config.py", "main.py", "utils", "ui", "tests"]
+files = ["config.py", "main.py", "core", "utils", "ui", "tests"]
