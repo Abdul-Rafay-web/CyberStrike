@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 
 Edge = tuple[int, int]
@@ -11,6 +11,22 @@ def make_edge(a: int, b: int) -> Edge:
     """Return the link between a and b with smaller number first."""
     return (a, b) if a < b else (b, a)
 
+def bfs_distances(
+    adjacency: Sequence[Iterable[int]], start: int, blocked: Collection[int] = ()
+) -> list[int]:
+    """Fewest links from start to every machine. A value of -1 means unreachable."""
+    distance = [-1] * len(adjacency)
+    if start in blocked:
+        return distance
+    distance[start] = 0
+    queue = deque([start])
+    while queue:
+        current = queue.popleft()
+        for nxt in adjacency[current]:
+            if distance[nxt] == -1 and nxt not in blocked:
+                distance[nxt] = distance[current] + 1
+                queue.append(nxt)
+    return distance
 
 @dataclass(frozen=True, slots=True)
 class Network:
@@ -52,15 +68,7 @@ class Network:
         return [(a, b) for a, others in enumerate(self.adjacency) for b in others if a < b]
 
     def is_connected(self) -> bool:
-        seen = {self.entry}
-        queue = deque([self.entry])
-        while queue:
-            current = queue.popleft()
-            for nxt in self.adjacency[current]:
-                if nxt not in seen:
-                    seen.add(nxt)
-                    queue.append(nxt)
-        return len(seen) == self.size
+        return -1 not in bfs_distances(self.adjacency, self.entry)
 
     @classmethod
     def from_edges(

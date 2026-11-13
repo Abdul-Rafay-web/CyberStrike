@@ -24,6 +24,12 @@ class GameConfig:
     win_value: int = 1000
     turn_penalty: int = 10
 
+@dataclass(frozen=True)
+class GeneratorConfig:
+    edge_factor: float = 1.5
+    min_entry_jewel_hops: int = 3
+    hardness_weights: tuple[float, float, float] = (0.4, 0.4, 0.2)
+    max_attempts: int = 200
 
 @dataclass(frozen=True)
 class SearchConfig:
@@ -58,9 +64,11 @@ class Theme:
 @dataclass(frozen=True)
 class AppConfig:
     game: GameConfig = field(default_factory=GameConfig)
+    generator: GeneratorConfig = field(default_factory=GeneratorConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     seeds: SeedConfig = field(default_factory=SeedConfig)
     theme: Theme = field(default_factory=Theme)
+    
 
 
 CONFIG = AppConfig()
