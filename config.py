@@ -21,6 +21,8 @@ class GameConfig:
     patch_hardness_bonus: int = 2
     honeypot_delay_turns: int = 2
     stock: StockConfig = field(default_factory=StockConfig)
+    win_value: int = 1000
+    turn_penalty: int = 10
 
 
 @dataclass(frozen=True)
