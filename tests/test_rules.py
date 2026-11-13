@@ -56,18 +56,27 @@ def test_patch_during_a_breach_adds_turns() -> None:
 def test_patch_rules() -> None:
     defender = replace(new_game(diamond_network()), side=Side.DEFENDER)
     actions = legal_actions(defender)
-    assert Patch(0) not in actions
+    assert Patch(0) in actions
     assert Patch(1) in actions
     after = replace(apply(defender, Patch(1)), side=Side.DEFENDER)
     assert Patch(1) not in legal_actions(after)
+def test_firewall_on_the_crossing_link_interrupts_the_breach() -> None:
+    mid_breach = apply(new_game(diamond_network()), Advance(2))
+    assert mid_breach.breach_target == 2
+    assert Firewall(0, 2) in legal_actions(mid_breach)
+
+    after = apply(mid_breach, Firewall(0, 2))
+    assert after.breach_target is None
+    assert after.breach_left == 0
+    assert after.attacker_pos == 0
+    assert legal_actions(after) == [Advance(1)]
 
 
-def test_firewall_cannot_cut_the_link_being_crossed() -> None:
-    mid_breach = apply(new_game(chain_network()), Advance(1))
-    actions = legal_actions(mid_breach)
-    assert Firewall(0, 1) not in actions
-    assert Firewall(1, 2) in actions
-
+def test_defender_menu_does_not_depend_on_hidden_facts() -> None:
+    quiet = replace(new_game(diamond_network()), side=Side.DEFENDER)
+    deep = replace(quiet, attacker_pos=1, breached=frozenset({0, 1}))
+    mid_breach = apply(new_game(diamond_network()), Advance(2))
+    assert legal_actions(quiet) == legal_actions(deep) == legal_actions(mid_breach)
 
 def test_honeypot_placement_rules() -> None:
     defender = replace(new_game(diamond_network()), side=Side.DEFENDER)

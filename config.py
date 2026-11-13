@@ -32,6 +32,12 @@ class GeneratorConfig:
     max_attempts: int = 200
 
 @dataclass(frozen=True)
+class SensorConfig:
+    detection_rate: float = 0.8
+    false_alarm_rate: float = 0.1
+
+
+@dataclass(frozen=True)
 class SearchConfig:
     max_depth_plies: int = 6
     time_budget_seconds: float = 2.0
@@ -65,6 +71,7 @@ class Theme:
 class AppConfig:
     game: GameConfig = field(default_factory=GameConfig)
     generator: GeneratorConfig = field(default_factory=GeneratorConfig)
+    sensors: SensorConfig = field(default_factory=SensorConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     seeds: SeedConfig = field(default_factory=SeedConfig)
     theme: Theme = field(default_factory=Theme)

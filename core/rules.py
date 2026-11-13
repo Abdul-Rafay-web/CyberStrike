@@ -82,32 +82,24 @@ def _attacker_actions(state: GameState) -> list[Action]:
 
 
 def _defender_actions(state: GameState) -> list[Action]:
+    """The defender menu uses only what the defender knows: its own stock and defenses."""
     net = state.network
     actions: list[Action] = []
 
     if state.stock.patches > 0:
         for machine in range(net.size):
-            if (
-                machine not in state.breached
-                and machine not in state.patched
-                and machine not in state.honeypots
-            ):
+            if machine not in state.patched and machine not in state.honeypots:
                 actions.append(Patch(machine))
 
     if state.stock.firewalls > 0:
-        crossing = None
-        if state.breach_target is not None:
-            crossing = make_edge(state.attacker_pos, state.breach_target)
         for a, b in net.edges():
-            if (a, b) not in state.firewalls and (a, b) != crossing:
+            if (a, b) not in state.firewalls:
                 actions.append(Firewall(a, b))
 
     if state.stock.honeypots > 0:
         for machine in range(net.size):
             if (
                 machine not in (net.entry, net.jewel)
-                and machine not in state.breached
-                and machine != state.breach_target
                 and machine not in state.patched
                 and machine not in state.honeypots
             ):
@@ -115,7 +107,6 @@ def _defender_actions(state: GameState) -> list[Action]:
 
     actions.append(Pass())
     return actions
-
 
 def legal_actions(state: GameState, config: GameConfig = CONFIG.game) -> list[Action]:
     if is_terminal(state, config):
@@ -185,6 +176,12 @@ def apply(
                 firewalls=state.firewalls | {(a, b)},
                 stock=replace(state.stock, firewalls=state.stock.firewalls - 1),
             )
+            crossing = (
+                state.breach_target is not None
+                and make_edge(state.attacker_pos, state.breach_target) == (a, b)
+            )
+            if crossing:
+                updated = replace(updated, breach_target=None, breach_left=0)
             return _finish_defender_turn(updated)
         case Honeypot(machine=machine):
             updated = replace(

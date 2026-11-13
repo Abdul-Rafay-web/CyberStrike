@@ -5,7 +5,7 @@ import numpy as np
 STREAM_MAP = 0
 STREAM_SENSORS = 1
 STREAM_AGENTS = 2
-
+STREAM_DEFENDER = 3
 
 def make_rng(seed: int, stream: int = STREAM_MAP) -> np.random.Generator:
     """Return a random generator for one seed and one named stream."""

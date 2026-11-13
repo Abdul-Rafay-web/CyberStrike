@@ -24,8 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
     play = sub.add_parser("play", help="open the game window")
     play.add_argument("--seed", type=int, default=CONFIG.seeds.master_seed)
 
-    tournament = sub.add_parser("tournament", help="run headless AI vs AI games")
+    tournament = sub.add_parser("tournament", help="run headless games")
     tournament.add_argument("--games", type=int, default=100)
+    tournament.add_argument("--size", type=int, default=None, help="number of machines")
 
     replay = sub.add_parser("replay", help="replay a saved game")
     replay.add_argument("path")
@@ -43,7 +44,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         run_window()
     elif args.command == "tournament":
-        log.info("tournament is not built yet")
+        from experiments.random_games import run_random_games
+
+        summary = run_random_games(args.games, args.size)
+        log.info("games finished", extra={"data": {"games": summary.games}})
+        print(summary.report())
     elif args.command == "replay":
         log.info("replay is not built yet")
     return 0
