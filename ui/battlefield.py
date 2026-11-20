@@ -7,8 +7,9 @@ from typing import Literal
 import pygame
 
 from config import CONFIG
-from core.network import Edge, make_edge
-from core.rules import effective_hardness
+from core.actions import Advance, Firewall, Honeypot, Patch
+from core.network import Edge, Network, make_edge
+from core.observation import AttackerObservation, DefenderObservation
 from core.state import GameState
 from ui.draw import (
     draw_alpha_rect,
@@ -39,6 +40,28 @@ class RippleEffect:
     max_ry: int = 38
 
 
+@dataclass(frozen=True, slots=True)
+class _BattlefieldScene:
+    """Strict view-model constructed solely from the allowed observation or spectator state."""
+
+    network: Network
+    patched: frozenset[int]
+    firewalls: frozenset[Edge]
+    honeypots: frozenset[int]
+    triggered: frozenset[int]
+    alerts: tuple[bool, ...]
+    intruder_known_at: int | None
+    can_see_intruder: bool
+    attacker_pos: int | None
+    breach_target: int | None
+    breach_left: int
+    breached: frozenset[int]
+    legal_patch_nodes: frozenset[int]
+    legal_honeypot_nodes: frozenset[int]
+    legal_firewall_edges: frozenset[Edge]
+    legal_attacker_targets: frozenset[int]
+
+
 def _point_to_segment_distance(
     px: float,
     py: float,
@@ -63,8 +86,15 @@ def _ease_out_cubic(t: float) -> float:
     return 1.0 - u * u * u
 
 
+def _display_hardness(network: Network, patched: frozenset[int], machine: int) -> int:
+    base = network.hardness[machine]
+    if machine in patched:
+        return base + CONFIG.game.patch_hardness_bonus
+    return base
+
+
 class BattlefieldView:
-    """Renders the isometric network map with unified node/ring anchoring and smooth animations."""
+    """Renders the isometric network map from strictly scoped observations."""
 
     PAD_LEFT = 88
     PAD_RIGHT = 88
@@ -90,6 +120,7 @@ class BattlefieldView:
         self._screen_pts: dict[int, tuple[int, int]] = {}
         self._base_pts: dict[int, tuple[int, int]] = {}
         self._sprite_sizes: dict[int, int] = {}
+        self._vignette_cache: dict[tuple[int, int], pygame.Surface] = {}
 
     def reset_animations(self, attacker_pos: int | None = None) -> None:
         self._hover_lift.clear()
@@ -107,7 +138,7 @@ class BattlefieldView:
         color: RGB,
         max_rx: int = 72,
     ) -> None:
-        self._sync_geometry(rect, metas, None)
+        self._sync_geometry(rect, metas, frozenset())
         base = self._base_pts.get(machine_idx)
         if base is not None:
             self._ripples.append(
@@ -121,7 +152,7 @@ class BattlefieldView:
         edge: Edge,
         color: RGB,
     ) -> None:
-        self._sync_geometry(rect, metas, None)
+        self._sync_geometry(rect, metas, frozenset())
         p1 = self._base_pts.get(edge[0])
         p2 = self._base_pts.get(edge[1])
         if p1 is not None and p2 is not None:
@@ -129,17 +160,23 @@ class BattlefieldView:
             my = (p1[1] + p2[1]) // 2
             self._ripples.append(RippleEffect(cx=mx, cy=my, color=color, max_rx=68, max_ry=34))
 
-    def update(self, dt: float, state: GameState, metas: tuple[NodeVisualMeta, ...]) -> None:
-        """Advance hover lifts, ripple expansions, and eased attacker transitions."""
+    def update(
+        self,
+        dt: float,
+        visible_attacker_pos: int | None,
+        metas: tuple[NodeVisualMeta, ...],
+    ) -> None:
+        """Advance hover lifts, ripple expansions, and eased visible attacker transitions."""
         self.time_s += dt
 
-        if self._last_attacker_pos is None:
-            self._last_attacker_pos = state.attacker_pos
-        elif state.attacker_pos != self._last_attacker_pos:
-            self._move_from_idx = self._last_attacker_pos
-            self._move_to_idx = state.attacker_pos
-            self._move_progress = 0.0
-            self._last_attacker_pos = state.attacker_pos
+        if visible_attacker_pos is not None:
+            if self._last_attacker_pos is None:
+                self._last_attacker_pos = visible_attacker_pos
+            elif visible_attacker_pos != self._last_attacker_pos:
+                self._move_from_idx = self._last_attacker_pos
+                self._move_to_idx = visible_attacker_pos
+                self._move_progress = 0.0
+                self._last_attacker_pos = visible_attacker_pos
 
         if self._move_progress < 1.0:
             self._move_progress = min(1.0, self._move_progress + dt / self._move_duration)
@@ -168,7 +205,7 @@ class BattlefieldView:
         self,
         rect: pygame.Rect,
         metas: tuple[NodeVisualMeta, ...],
-        state: GameState | None,
+        patched: frozenset[int],
     ) -> None:
         base_sz = self._base_sprite_size(len(metas))
         self._screen_pts.clear()
@@ -188,59 +225,26 @@ class BattlefieldView:
             sz = base_sz
             if meta.role == "crown_jewel":
                 sz = base_sz + 14
-            elif state is not None and meta.index in state.patched:
+            elif meta.index in patched:
                 sz = base_sz + 6
 
             self._screen_pts[meta.index] = (px, py)
             self._base_pts[meta.index] = (px, py + int(round(sz * 0.24)))
             self._sprite_sizes[meta.index] = sz
 
-    def is_node_legal_for_tool(
-        self,
-        state: GameState,
-        machine_idx: int,
-        active_tool: ToolMode,
-    ) -> bool:
-        if active_tool == "patch":
-            return (
-                state.stock.patches > 0
-                and machine_idx not in state.patched
-                and (machine_idx not in state.honeypots)
-            )
-        if active_tool == "honeypot":
-            net = state.network
-            return (
-                state.stock.honeypots > 0
-                and machine_idx not in (net.entry, net.jewel)
-                and machine_idx not in state.patched
-                and machine_idx not in state.honeypots
-            )
-        return False
-
-    def is_edge_legal_for_firewall(
-        self,
-        state: GameState,
-        edge: Edge,
-        active_tool: ToolMode,
-    ) -> bool:
-        return (
-            active_tool == "firewall" and state.stock.firewalls > 0 and edge not in state.firewalls
-        )
-
     def pick_machine(
         self,
         pos: tuple[int, int],
         rect: pygame.Rect,
         metas: tuple[NodeVisualMeta, ...],
-        state: GameState,
+        patched: frozenset[int],
     ) -> int | None:
         """Return the machine index under pos, or None."""
         if not rect.collidepoint(pos):
             return None
-        self._sync_geometry(rect, metas, state)
+        self._sync_geometry(rect, metas, patched)
         best_idx: int | None = None
         best_dist = float("inf")
-        # Iterate back-to-front in reverse so foreground sprites win ties.
         for meta in reversed(sorted(metas, key=lambda m: self._screen_pts[m.index][1])):
             px, py = self._screen_pts[meta.index]
             sz = self._sprite_sizes[meta.index]
@@ -258,15 +262,16 @@ class BattlefieldView:
         pos: tuple[int, int],
         rect: pygame.Rect,
         metas: tuple[NodeVisualMeta, ...],
-        state: GameState,
+        network: Network,
+        patched: frozenset[int],
     ) -> Edge | None:
         """Return the network Edge under pos (or midpoint pill), or None."""
         if not rect.collidepoint(pos):
             return None
-        self._sync_geometry(rect, metas, state)
+        self._sync_geometry(rect, metas, patched)
         best_edge: Edge | None = None
         best_dist = 20.0
-        for a, b in state.network.edges():
+        for a, b in network.edges():
             p1 = self._base_pts[a]
             p2 = self._base_pts[b]
             mx, my = (p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0
@@ -279,27 +284,109 @@ class BattlefieldView:
                 best_edge = make_edge(a, b)
         return best_edge
 
+    def _build_scene(
+        self,
+        view_mode: ViewMode,
+        god_mode: bool,
+        obs_def: DefenderObservation | None,
+        obs_atk: AttackerObservation | None,
+        spectator_state: GameState | None,
+    ) -> _BattlefieldScene:
+        if view_mode == "spectator" and god_mode and spectator_state is not None:
+            alerts = obs_def.alerts if obs_def is not None else ()
+            known = obs_def.intruder_known_at if obs_def is not None else None
+            return _BattlefieldScene(
+                network=spectator_state.network,
+                patched=spectator_state.patched,
+                firewalls=spectator_state.firewalls,
+                honeypots=spectator_state.honeypots,
+                triggered=spectator_state.triggered,
+                alerts=alerts,
+                intruder_known_at=known,
+                can_see_intruder=True,
+                attacker_pos=spectator_state.attacker_pos,
+                breach_target=spectator_state.breach_target,
+                breach_left=spectator_state.breach_left,
+                breached=spectator_state.breached,
+                legal_patch_nodes=frozenset(),
+                legal_honeypot_nodes=frozenset(),
+                legal_firewall_edges=frozenset(),
+                legal_attacker_targets=frozenset(),
+            )
+
+        if view_mode == "attacker" and obs_atk is not None:
+            return _BattlefieldScene(
+                network=obs_atk.network,
+                patched=obs_atk.patched,
+                firewalls=obs_atk.firewalls,
+                honeypots=frozenset(),
+                triggered=obs_atk.known_honeypots,
+                alerts=(),
+                intruder_known_at=None,
+                can_see_intruder=True,
+                attacker_pos=obs_atk.position,
+                breach_target=obs_atk.breach_target,
+                breach_left=obs_atk.breach_left,
+                breached=obs_atk.breached,
+                legal_patch_nodes=frozenset(),
+                legal_honeypot_nodes=frozenset(),
+                legal_firewall_edges=frozenset(),
+                legal_attacker_targets=frozenset(
+                    a.target for a in obs_atk.legal_actions if isinstance(a, Advance)
+                ),
+            )
+
+        assert obs_def is not None
+        known_triggered = (
+            frozenset({obs_def.intruder_known_at})
+            if obs_def.intruder_known_at is not None
+            else frozenset()
+        )
+        return _BattlefieldScene(
+            network=obs_def.network,
+            patched=obs_def.patched,
+            firewalls=obs_def.firewalls,
+            honeypots=obs_def.honeypots,
+            triggered=known_triggered,
+            alerts=obs_def.alerts,
+            intruder_known_at=obs_def.intruder_known_at,
+            can_see_intruder=False,
+            attacker_pos=None,
+            breach_target=None,
+            breach_left=0,
+            breached=frozenset(),
+            legal_patch_nodes=frozenset(
+                a.machine for a in obs_def.legal_actions if isinstance(a, Patch)
+            ),
+            legal_honeypot_nodes=frozenset(
+                a.machine for a in obs_def.legal_actions if isinstance(a, Honeypot)
+            ),
+            legal_firewall_edges=frozenset(
+                make_edge(a.a, a.b) for a in obs_def.legal_actions if isinstance(a, Firewall)
+            ),
+            legal_attacker_targets=frozenset(),
+        )
+
     def _resolve_sprite_key(
         self,
-        state: GameState,
+        scene: _BattlefieldScene,
         meta: NodeVisualMeta,
-        can_see_intruder: bool,
         highlighted: bool,
     ) -> str:
         idx = meta.index
-        if idx == state.network.jewel:
+        if idx == scene.network.jewel:
             return "crown_jewel"
-        if idx in state.triggered:
+        if idx in scene.triggered:
             return "honeypot"
-        if can_see_intruder and state.breach_target == idx:
+        if scene.can_see_intruder and scene.breach_target == idx:
             return "under_breach"
-        if can_see_intruder and (
-            idx == state.attacker_pos or (idx in state.breached and idx != state.network.entry)
+        if scene.can_see_intruder and (
+            idx == scene.attacker_pos or (idx in scene.breached and idx != scene.network.entry)
         ):
             return "breached"
-        if idx in state.patched:
+        if idx in scene.patched:
             return "patched"
-        if idx == state.network.entry:
+        if idx == scene.network.entry:
             return "entry_point"
         if highlighted:
             return "selected"
@@ -309,7 +396,6 @@ class BattlefieldView:
         self,
         surface: pygame.Surface,
         rect: pygame.Rect,
-        state: GameState,
         metas: tuple[NodeVisualMeta, ...],
         palette: ThemePalette,
         fonts: FontBook,
@@ -318,21 +404,21 @@ class BattlefieldView:
         god_mode: bool,
         active_tool: ToolMode,
         selected_node: int | None,
-        alerts: tuple[bool, ...],
-        intruder_known_at: int | None,
-        legal_attacker_targets: set[int],
+        obs_def: DefenderObservation | None,
+        obs_atk: AttackerObservation | None,
+        spectator_state: GameState | None,
         seed: int,
         show_heatmap: bool,
         show_breach_trace: bool,
         show_hardness_badges: bool,
     ) -> None:
-        """Render the complete battlefield inside rect with strict border clipping."""
-        self._sync_geometry(rect, metas, state)
+        """Render the battlefield strictly from the view's permitted observation."""
+        scene = self._build_scene(view_mode, god_mode, obs_def, obs_atk, spectator_state)
+        self._sync_geometry(rect, metas, scene.patched)
         prev_clip = surface.get_clip()
         surface.set_clip(rect)
 
         try:
-            # 1. Background war-room console surface + tiled 2:1 isometric grid + vignette
             surface.fill(palette.bg, rect)
             bg_img = vault.get_cover("backgrounds/warroom_console_4k.jpg", rect.size)
             bg_copy = bg_img.copy()
@@ -343,112 +429,87 @@ class BattlefieldView:
 
             self._draw_vignette(surface, rect)
 
-            # 2. Optional 4K reference comparison overlay
             if self.peek_ref_mode != "none":
                 self._draw_reference_overlay(surface, rect, palette, fonts, vault)
-                self._draw_top_chrome(surface, rect, state, seed, active_tool, palette, fonts)
+                self._draw_top_chrome(
+                    surface, rect, scene.network, seed, active_tool, palette, fonts
+                )
                 return
 
-            can_see_intruder = view_mode == "attacker" or (view_mode == "spectator" and god_mode)
             effective_heatmap = view_mode != "attacker" and show_heatmap
 
-            # 3. Alert thermal halo & Crown Jewel golden base aura (centered strictly on base_pts!)
             if effective_heatmap:
-                self._draw_heatmap_rings(
-                    surface,
-                    state,
-                    metas,
-                    alerts,
-                    intruder_known_at,
-                    palette,
-                    fonts,
-                    vault,
-                )
+                self._draw_heatmap_rings(surface, scene, metas, palette, fonts, vault)
 
-            # 4. Isometric base pedestal wireframe rings (centered strictly on base_pts)
-            self._draw_pedestal_rings(surface, state, metas, alerts, view_mode, palette)
+            self._draw_pedestal_rings(surface, scene, metas, view_mode, palette)
 
-            # 5. Network links + Firewalled 4x13 matrices + Breach trace + Firewall hit pills
             self._draw_links(
                 surface,
-                state,
+                scene,
                 palette,
                 fonts,
                 vault,
-                can_see_intruder,
                 active_tool,
                 show_breach_trace,
             )
 
-            # 6. Expanding ripple effects (defense placement / honeypot trigger)
             self._draw_ripples(surface, vault)
 
-            # 7. Eased intruder vector pulse moving from previous node to new node
             if (
-                can_see_intruder
+                scene.can_see_intruder
                 and self._move_progress < 1.0
                 and (self._move_from_idx is not None and self._move_to_idx is not None)
             ):
                 self._draw_eased_intruder_transit(surface, palette)
 
-            # 8. Machines back-to-front (painter's order by y)
             ordered_metas = sorted(metas, key=lambda m: self._screen_pts[m.index][1])
             for meta in ordered_metas:
                 self._draw_machine_node(
                     surface,
-                    rect,
-                    state,
+                    scene,
                     meta,
                     palette,
                     fonts,
                     vault,
                     view_mode,
-                    can_see_intruder,
                     active_tool,
                     selected_node,
-                    alerts,
-                    intruder_known_at,
-                    legal_attacker_targets,
                     show_hardness_badges,
                 )
 
-            # 9. Clamped hover micro-tooltip drawn on top inside rect
             if self.hovered_node is not None and 0 <= self.hovered_node < len(metas):
                 self._draw_hover_tooltip(
                     surface,
                     rect,
-                    state,
+                    scene,
                     metas[self.hovered_node],
                     palette,
                     fonts,
                     view_mode,
-                    alerts,
                 )
 
-            # 10. Top header labels + Ref Compare button
-            self._draw_top_chrome(surface, rect, state, seed, active_tool, palette, fonts)
-
-            # Border frame
+            self._draw_top_chrome(surface, rect, scene.network, seed, active_tool, palette, fonts)
             pygame.draw.rect(surface, with_alpha(palette.cyan, 80), rect, 1)
         finally:
             surface.set_clip(prev_clip)
 
     def _draw_vignette(self, surface: pygame.Surface, rect: pygame.Rect) -> None:
-        edge_fade = pygame.Surface(rect.size, pygame.SRCALPHA)
-        w, h = rect.size
-        pygame.draw.rect(edge_fade, (4, 4, 10, 120), pygame.Rect(0, 0, w, 28))
-        pygame.draw.rect(edge_fade, (4, 4, 10, 130), pygame.Rect(0, h - 28, w, 28))
-        pygame.draw.rect(edge_fade, (4, 4, 10, 120), pygame.Rect(0, 0, 26, h))
-        pygame.draw.rect(edge_fade, (4, 4, 10, 120), pygame.Rect(w - 26, 0, 26, h))
+        edge_fade = self._vignette_cache.get(rect.size)
+        if edge_fade is None:
+            edge_fade = pygame.Surface(rect.size, pygame.SRCALPHA)
+            w, h = rect.size
+            pygame.draw.rect(edge_fade, (4, 4, 10, 120), pygame.Rect(0, 0, w, 28))
+            pygame.draw.rect(edge_fade, (4, 4, 10, 130), pygame.Rect(0, h - 28, w, 28))
+            pygame.draw.rect(edge_fade, (4, 4, 10, 120), pygame.Rect(0, 0, 26, h))
+            pygame.draw.rect(edge_fade, (4, 4, 10, 120), pygame.Rect(w - 26, 0, 26, h))
+            self._vignette_cache[rect.size] = edge_fade
         surface.blit(edge_fade, rect.topleft)
 
     def _draw_heatmap_rings(
         self,
         surface: pygame.Surface,
-        state: GameState,
+        scene: _BattlefieldScene,
         metas: tuple[NodeVisualMeta, ...],
-        alerts: tuple[bool, ...],
-        intruder_known_at: int | None,
         palette: ThemePalette,
         fonts: FontBook,
         vault: AssetVault,
@@ -457,8 +518,8 @@ class BattlefieldView:
         for meta in metas:
             idx = meta.index
             bx, by = self._base_pts[idx]
-            is_known = intruder_known_at == idx
-            is_alert = idx < len(alerts) and alerts[idx]
+            is_known = scene.intruder_known_at == idx
+            is_alert = idx < len(scene.alerts) and scene.alerts[idx]
 
             if is_known or is_alert:
                 col = palette.red if is_alert or is_known else palette.amber
@@ -480,8 +541,7 @@ class BattlefieldView:
                 )
                 draw_iso_ellipse_ring(surface, (bx, by), 72, 37, col, alpha=85, width=1)
 
-        # Crown Jewel golden concentric halo strictly centered on jewel base
-        j_bx, j_by = self._base_pts[state.network.jewel]
+        j_bx, j_by = self._base_pts[scene.network.jewel]
         jewel_blob = vault.get_effect("effect_heat_blob", (184, 108), tint=palette.amber, alpha=105)
         surface.blit(
             jewel_blob, (j_bx - jewel_blob.get_width() // 2, j_by - jewel_blob.get_height() // 2)
@@ -497,33 +557,32 @@ class BattlefieldView:
     def _draw_pedestal_rings(
         self,
         surface: pygame.Surface,
-        state: GameState,
+        scene: _BattlefieldScene,
         metas: tuple[NodeVisualMeta, ...],
-        alerts: tuple[bool, ...],
         view_mode: ViewMode,
         palette: ThemePalette,
     ) -> None:
         for meta in metas:
             idx = meta.index
             bx, by = self._base_pts[idx]
-            is_alert = idx < len(alerts) and alerts[idx] and view_mode != "attacker"
+            is_alert = idx < len(scene.alerts) and scene.alerts[idx] and view_mode != "attacker"
             if is_alert:
                 col = palette.red
                 alpha_outer, alpha_inner = 165, 210
-            elif idx in state.patched:
+            elif idx in scene.patched:
                 col = palette.cyan
                 alpha_outer, alpha_inner = 155, 200
-            elif idx == state.network.jewel or meta.role == "gateway":
+            elif idx == scene.network.jewel or meta.role == "gateway":
                 col = palette.amber
                 alpha_outer, alpha_inner = 115, 160
             else:
                 col = (90, 118, 132)
                 alpha_outer, alpha_inner = 85, 60
 
-            rx_out = 44 if idx == state.network.jewel else 32
-            ry_out = 22 if idx == state.network.jewel else 16
-            rx_in = 33 if idx == state.network.jewel else 23
-            ry_in = 16 if idx == state.network.jewel else 11
+            rx_out = 44 if idx == scene.network.jewel else 32
+            ry_out = 22 if idx == scene.network.jewel else 16
+            rx_in = 33 if idx == scene.network.jewel else 23
+            ry_in = 16 if idx == scene.network.jewel else 11
             draw_iso_ellipse_ring(
                 surface, (bx, by), rx_out, ry_out, col, alpha=alpha_outer, width=1
             )
@@ -532,33 +591,33 @@ class BattlefieldView:
     def _draw_links(
         self,
         surface: pygame.Surface,
-        state: GameState,
+        scene: _BattlefieldScene,
         palette: ThemePalette,
         fonts: FontBook,
         vault: AssetVault,
-        can_see_intruder: bool,
         active_tool: ToolMode,
         show_breach_trace: bool,
     ) -> None:
-        for a, b in state.network.edges():
+        for a, b in scene.network.edges():
             edge = make_edge(a, b)
             p1 = self._base_pts[a]
             p2 = self._base_pts[b]
             mx, my = (p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2
-            is_firewalled = edge in state.firewalls
+            is_firewalled = edge in scene.firewalls
             is_hovered = self.hovered_edge == edge
-            can_fw = self.is_edge_legal_for_firewall(state, edge, active_tool)
+            can_fw = active_tool == "firewall" and edge in scene.legal_firewall_edges
 
             is_active_breach = (
-                can_see_intruder
-                and state.breach_target is not None
-                and make_edge(state.attacker_pos, state.breach_target) == edge
+                scene.can_see_intruder
+                and scene.attacker_pos is not None
+                and scene.breach_target is not None
+                and make_edge(scene.attacker_pos, scene.breach_target) == edge
             )
             is_breached_trail = (
-                (can_see_intruder or show_breach_trace)
+                (scene.can_see_intruder or show_breach_trace)
                 and not is_firewalled
-                and a in state.breached
-                and b in state.breached
+                and a in scene.breached
+                and b in scene.breached
             )
 
             if is_firewalled:
@@ -576,22 +635,14 @@ class BattlefieldView:
                     width=2,
                     phase=self.time_s,
                 )
-            elif is_breached_trail and can_see_intruder:
+            elif is_breached_trail and scene.can_see_intruder:
                 draw_glow_line(surface, p1, p2, palette.red, width=2, core_alpha=175, glow_alpha=65)
             elif can_fw and is_hovered:
                 draw_glow_line(
                     surface, p1, p2, palette.amber, width=3, core_alpha=240, glow_alpha=100
                 )
             else:
-                draw_glow_line(
-                    surface,
-                    p1,
-                    p2,
-                    (132, 175, 190),
-                    width=1,
-                    core_alpha=125,
-                    glow_alpha=0,
-                )
+                pygame.draw.line(surface, (68, 92, 106), p1, p2, 1)
 
             if can_fw:
                 pill_bg = (255, 164, 27, 235) if is_hovered else (14, 25, 34, 230)
@@ -633,19 +684,14 @@ class BattlefieldView:
     def _draw_machine_node(
         self,
         surface: pygame.Surface,
-        rect: pygame.Rect,
-        state: GameState,
+        scene: _BattlefieldScene,
         meta: NodeVisualMeta,
         palette: ThemePalette,
         fonts: FontBook,
         vault: AssetVault,
         view_mode: ViewMode,
-        can_see_intruder: bool,
         active_tool: ToolMode,
         selected_node: int | None,
-        alerts: tuple[bool, ...],
-        intruder_known_at: int | None,
-        legal_attacker_targets: set[int],
         show_hardness_badges: bool,
     ) -> None:
         idx = meta.index
@@ -656,12 +702,13 @@ class BattlefieldView:
 
         is_selected = selected_node == idx
         is_hovered = self.hovered_node == idx
-        defender_legal = view_mode == "defender" and self.is_node_legal_for_tool(
-            state, idx, active_tool
+        defender_legal = view_mode == "defender" and (
+            (active_tool == "patch" and idx in scene.legal_patch_nodes)
+            or (active_tool == "honeypot" and idx in scene.legal_honeypot_nodes)
         )
-        attacker_legal = view_mode == "attacker" and idx in legal_attacker_targets
-        is_alert = view_mode != "attacker" and idx < len(alerts) and alerts[idx]
-        is_known_intruder = view_mode != "attacker" and intruder_known_at == idx
+        attacker_legal = view_mode == "attacker" and idx in scene.legal_attacker_targets
+        is_alert = view_mode != "attacker" and idx < len(scene.alerts) and scene.alerts[idx]
+        is_known_intruder = view_mode != "attacker" and scene.intruder_known_at == idx
 
         # Concentric targeting / selection rings locked strictly around machine base (bx, by)
         pulse_phase = self.time_s * 1.8
@@ -699,32 +746,28 @@ class BattlefieldView:
                 width=2,
             )
 
-        # Glow disc under alerted / Crown Jewel / active intruder nodes
         if is_alert or is_known_intruder:
             disc = vault.get_effect(
                 "effect_glow_disc", (sz + 18, (sz + 18) // 2), tint=palette.red, alpha=175
             )
             surface.blit(disc, (bx - disc.get_width() // 2, by - disc.get_height() // 2))
-        elif idx == state.network.jewel:
+        elif idx == scene.network.jewel:
             disc = vault.get_effect(
                 "effect_glow_disc", (sz + 22, (sz + 22) // 2), tint=palette.amber, alpha=155
             )
             surface.blit(disc, (bx - disc.get_width() // 2, by - disc.get_height() // 2))
 
-        # Sprite image centered at (px, py - lift)
         sprite_key = self._resolve_sprite_key(
-            state,
+            scene,
             meta,
-            can_see_intruder,
             highlighted=is_selected or is_hovered or defender_legal or attacker_legal,
         )
         sprite = vault.get_machine(sprite_key, sz)
         surface.blit(sprite, (px - sz // 2, py - sz // 2 - lift))
 
-        # Optional hardness badge on top-right corner of sprite
         if show_hardness_badges or view_mode == "attacker":
-            eff_h = effective_hardness(state, idx, CONFIG.game)
-            badge_col = palette.cyan if idx in state.patched else palette.amber
+            eff_h = _display_hardness(scene.network, scene.patched, idx)
+            badge_col = palette.cyan if idx in scene.patched else palette.amber
             draw_badge_pill(
                 surface,
                 (px + sz // 2 - 4, py - sz // 2 + 6 - lift),
@@ -738,7 +781,6 @@ class BattlefieldView:
                 pad_y=1,
             )
 
-        # Fixed-offset top callout banner (above sprite, never shifts rings!)
         banner_y = py - sz // 2 - 8 - lift
         if is_alert or is_known_intruder:
             banner_txt = "! INTRUDER CONFIRMED" if is_known_intruder else "! ANOMALY ALERT"
@@ -755,10 +797,10 @@ class BattlefieldView:
                 pad_y=2,
             )
             banner_y -= 18
-        elif can_see_intruder and idx == state.attacker_pos:
+        elif scene.can_see_intruder and idx == scene.attacker_pos:
             status_txt = (
-                f"BREACHING [{state.breach_left}T]"
-                if state.breach_target is not None
+                f"BREACHING [{scene.breach_left}T]"
+                if scene.breach_target is not None
                 else "INTRUDER VECTOR"
             )
             draw_badge_pill(
@@ -775,7 +817,7 @@ class BattlefieldView:
             )
             banner_y -= 18
 
-        if view_mode != "attacker" and idx in state.honeypots and idx not in state.triggered:
+        if view_mode != "attacker" and idx in scene.honeypots and idx not in scene.triggered:
             draw_badge_pill(
                 surface,
                 (px, banner_y),
@@ -789,7 +831,6 @@ class BattlefieldView:
                 pad_y=1,
             )
 
-        # Fixed-offset bottom labels directly below the isometric pedestal
         label_y = by + int(sz * 0.24) + 5
         lbl_surf = fonts.get("heading", 12, bold=True).render(meta.label, True, palette.text)
         surface.blit(lbl_surf, (px - lbl_surf.get_width() // 2, label_y))
@@ -799,12 +840,12 @@ class BattlefieldView:
         sub_bg: tuple[int, int, int, int] | None = None
         sub_border: tuple[int, int, int, int] | None = None
 
-        if idx in state.triggered:
+        if idx in scene.triggered:
             sub_text = "HONEYPOT HIT"
             sub_fg = (233, 213, 255)
             sub_bg = (50, 20, 80, 230)
             sub_border = with_alpha(palette.violet, 230)
-        elif idx in state.patched:
+        elif idx in scene.patched:
             sub_text = "PATCHED"
             sub_fg = palette.cyan
             sub_bg = (18, 62, 66, 230)
@@ -839,31 +880,30 @@ class BattlefieldView:
         self,
         surface: pygame.Surface,
         rect: pygame.Rect,
-        state: GameState,
+        scene: _BattlefieldScene,
         meta: NodeVisualMeta,
         palette: ThemePalette,
         fonts: FontBook,
         view_mode: ViewMode,
-        alerts: tuple[bool, ...],
     ) -> None:
         idx = meta.index
         px, py = self._screen_pts[idx]
-        eff_h = effective_hardness(state, idx, CONFIG.game)
+        eff_h = _display_hardness(scene.network, scene.patched, idx)
 
         lines: list[tuple[str, RGB]] = [
             (f"{meta.code}  //  CVSS {meta.cvss:.1f}", palette.cyan),
             (
-                f"HARDNESS: {eff_h}T {'(+2 PATCH)' if idx in state.patched else ''}",
+                f"HARDNESS: {eff_h}T {'(+2 PATCH)' if idx in scene.patched else ''}",
                 palette.text,
             ),
             (f"ROLE: {meta.role.replace('_', ' ').upper()}", palette.muted),
         ]
         if view_mode != "attacker":
-            alert_txt = "ACTIVE" if (idx < len(alerts) and alerts[idx]) else "QUIET"
+            alert_txt = "ACTIVE" if (idx < len(scene.alerts) and scene.alerts[idx]) else "QUIET"
             alert_col = palette.red if alert_txt == "ACTIVE" else palette.cyan
             lines.append((f"SENSOR ALERT: {alert_txt}", alert_col))
         else:
-            owned_txt = "OWNED" if idx in state.breached else "UNBREACHED"
+            owned_txt = "OWNED" if idx in scene.breached else "UNBREACHED"
             lines.append((f"STATUS: {owned_txt}", palette.amber))
 
         w = 192
@@ -893,7 +933,7 @@ class BattlefieldView:
         self,
         surface: pygame.Surface,
         rect: pygame.Rect,
-        state: GameState,
+        network: Network,
         seed: int,
         active_tool: ToolMode,
         palette: ThemePalette,
@@ -904,9 +944,7 @@ class BattlefieldView:
         title_s = fonts.get("heading", 17, bold=True).render("NETWORK Map", True, palette.text)
         surface.blit(title_s, (nx, ny))
 
-        meta_txt = (
-            f"{state.network.size} NODES // {len(state.network.edges())} LINKS // SEED #{seed}"
-        )
+        meta_txt = f"{network.size} NODES // {len(network.edges())} LINKS // SEED #{seed}"
         pill = draw_badge_pill(
             surface,
             (nx + title_s.get_width() + 12, ny + 2),

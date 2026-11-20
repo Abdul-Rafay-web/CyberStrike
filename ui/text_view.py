@@ -50,9 +50,7 @@ class StepPrinter:
         notes: list[str] = []
         if before.side is Side.ATTACKER:
             if after.breach_target is not None:
-                notes.append(
-                    f"breach on {after.breach_target}, {after.breach_left} more turns"
-                )
+                notes.append(f"breach on {after.breach_target}, {after.breach_left} more turns")
             elif after.attacker_pos != before.attacker_pos:
                 notes.append(f"now owns machine {after.attacker_pos}")
         if len(after.triggered) > len(before.triggered):

@@ -6,10 +6,11 @@ from typing import Literal
 import pygame
 
 from config import CONFIG
-from core.actions import Advance
+from core.actions import Advance, Firewall, Honeypot, Pass, Patch
 from core.chokepoints import chokepoints
+from core.network import Network
 from core.observation import AttackerObservation, DefenderObservation
-from core.rules import Outcome, effective_hardness, outcome
+from core.rules import Outcome, outcome
 from core.state import GameState, Side
 from ui.draw import (
     ButtonSpec,
@@ -51,13 +52,22 @@ class GameSettingsState:
     god_mode_spectator: bool = True
 
 
-def derive_attack_stage(state: GameState) -> str:
-    """Compute human-readable intrusion stage strictly from GameState."""
-    if state.network.jewel in state.breached:
+def _machine_hardness(network: Network, patched: frozenset[int], machine: int) -> int:
+    base = network.hardness[machine]
+    if machine in patched:
+        return base + CONFIG.game.patch_hardness_bonus
+    return base
+
+
+def derive_attack_stage_from_breached(
+    network: Network, breached: frozenset[int], breach_target: int | None
+) -> str:
+    """Compute human-readable intrusion stage when breached set is visible."""
+    if network.jewel in breached:
         return "EXFILTRATION"
-    if len(state.breached) >= 4:
+    if len(breached) >= 4:
         return "PRIVILEGE ESCALATION"
-    if len(state.breached) >= 2 or state.breach_target is not None:
+    if len(breached) >= 2 or breach_target is not None:
         return "LATERAL MOVEMENT"
     return "INITIAL ACCESS"
 
@@ -74,7 +84,10 @@ def draw_top_hud_header(
     palette: ThemePalette,
     fonts: FontBook,
     vault: AssetVault,
-    state: GameState,
+    turn: int,
+    node_count: int,
+    stock_remaining: int,
+    stage_label: str,
     sector_name: str,
     seed: int,
     view_mode: str,
@@ -154,7 +167,7 @@ def draw_top_hud_header(
     # Turn counter
     turn_lbl = fonts.get("heading", 13, bold=True).render("TURN", True, (184, 208, 220))
     turn_val = fonts.get("title", 14, bold=True).render(
-        f"[{state.turn:02d} / {CONFIG.game.turn_limit:02d}]", True, palette.text
+        f"[{turn:02d} / {CONFIG.game.turn_limit:02d}]", True, palette.text
     )
     turn_x = limit_rect.left - 18 - turn_val.get_width() - 6 - turn_lbl.get_width()
     surface.blit(turn_lbl, (turn_x, 22 - turn_lbl.get_height() // 2))
@@ -173,10 +186,9 @@ def draw_top_hud_header(
     draw_alpha_rect(surface, sub_rect, with_alpha(palette.sub_bar, 245))
     pygame.draw.line(surface, with_alpha(palette.cyan, 45), (0, 75), (width, 75), 1)
 
-    rem_stock = state.stock.patches + state.stock.firewalls + state.stock.honeypots
     telem = (
-        f"SEED: #{seed}   |   NODES: {state.network.size}   |   STOCK: {rem_stock}/7   |   "
-        f"STAGE: {derive_attack_stage(state)}   |   VIEW: {view_mode.upper()}"
+        f"SEED: #{seed}   |   NODES: {node_count}   |   STOCK: {stock_remaining}/7   |   "
+        f"STAGE: {stage_label}   |   VIEW: {view_mode.upper()}"
     )
     t_surf = fonts.get("mono", 11).render(telem, True, (156, 180, 194))
     surface.blit(t_surf, (14, 60 - t_surf.get_height() // 2))
@@ -220,14 +232,13 @@ def draw_defender_command_panel(
     palette: ThemePalette,
     fonts: FontBook,
     vault: AssetVault,
-    state: GameState,
     metas: tuple[NodeVisualMeta, ...],
     observation: DefenderObservation,
     active_tool: str | None,
     selected_node: int | None,
     hovered_id: str | None,
 ) -> list[ButtonSpec]:
-    """Render the Defender Command right sidebar matching the War-Room layout."""
+    """Render the Defender Command sidebar strictly from DefenderObservation."""
     inner = draw_tactical_panel(
         surface,
         rect,
@@ -248,7 +259,7 @@ def draw_defender_command_panel(
             (inner.left, y),
             w,
             "PATCHES",
-            state.stock.patches,
+            observation.stock.patches,
             CONFIG.game.stock.patches,
             palette.cyan,
             palette,
@@ -262,7 +273,7 @@ def draw_defender_command_panel(
             (inner.left, y),
             w,
             "FIREWALLS",
-            state.stock.firewalls,
+            observation.stock.firewalls,
             CONFIG.game.stock.firewalls,
             palette.amber,
             palette,
@@ -276,7 +287,7 @@ def draw_defender_command_panel(
             (inner.left, y),
             w,
             "HONEYPOTS",
-            state.stock.honeypots,
+            observation.stock.honeypots,
             CONFIG.game.stock.honeypots,
             palette.violet,
             palette,
@@ -320,7 +331,7 @@ def draw_defender_command_panel(
         s_col = palette.cyan
 
     if selected_node is not None and 0 <= selected_node < len(metas):
-        sel_hrd = effective_hardness(state, selected_node, CONFIG.game)
+        sel_hrd = _machine_hardness(observation.network, observation.patched, selected_node)
         sel_txt = f"SELECTED: {metas[selected_node].code} (HRD {sel_hrd})"
     else:
         sel_txt = "CLICK A NODE OR ARMED TOOL"
@@ -342,8 +353,10 @@ def draw_defender_command_panel(
     surface.blit(op_sub, (inner.left, y + 17))
     y += 38
 
-    game_over = outcome(state, CONFIG.game) is not Outcome.ONGOING
-    not_turn = state.side is not Side.DEFENDER or game_over
+    can_patch = any(isinstance(a, Patch) for a in observation.legal_actions)
+    can_fw = any(isinstance(a, Firewall) for a in observation.legal_actions)
+    can_hp = any(isinstance(a, Honeypot) for a in observation.legal_actions)
+    can_pass = any(isinstance(a, Pass) for a in observation.legal_actions)
     btn_h = 36
     gap = 8
 
@@ -354,7 +367,7 @@ def draw_defender_command_panel(
             "icon_patch",
             "+2 HRD",
             active_tool == "patch",
-            not_turn or state.stock.patches <= 0,
+            not can_patch,
         ),
         (
             "tool_firewall",
@@ -362,7 +375,7 @@ def draw_defender_command_panel(
             "icon_firewall",
             "CUT LINK",
             active_tool == "firewall",
-            not_turn or state.stock.firewalls <= 0,
+            not can_fw,
         ),
         (
             "tool_honeypot",
@@ -370,7 +383,7 @@ def draw_defender_command_panel(
             "icon_honeypot",
             "TRAP 2T",
             active_tool == "honeypot",
-            not_turn or state.stock.honeypots <= 0,
+            not can_hp,
         ),
     ]
 
@@ -397,7 +410,7 @@ def draw_defender_command_panel(
         label="PASS TURN",
         variant="amber",
         icon_name="icon_pass",
-        disabled=not_turn,
+        disabled=not can_pass,
         font_size=14,
     )
     draw_tactical_button(
@@ -414,13 +427,14 @@ def draw_attacker_command_panel(
     palette: ThemePalette,
     fonts: FontBook,
     vault: AssetVault,
-    state: GameState,
     metas: tuple[NodeVisualMeta, ...],
     observation: AttackerObservation,
     hovered_id: str | None,
 ) -> list[ButtonSpec]:
-    """Render the Attacker Command right sidebar driven directly by AttackerObservation."""
-    stage = derive_attack_stage(state)
+    """Render the Attacker Command right sidebar driven strictly by AttackerObservation."""
+    stage = derive_attack_stage_from_breached(
+        observation.network, observation.breached, observation.breach_target
+    )
     inner = draw_tactical_panel(
         surface,
         rect,
@@ -439,7 +453,7 @@ def draw_attacker_command_panel(
     cur_meta = metas[cur_idx]
     target_idx = observation.breach_target
     active_idx = target_idx if target_idx is not None else cur_idx
-    eff_h = effective_hardness(state, active_idx, CONFIG.game)
+    eff_h = _machine_hardness(observation.network, observation.patched, active_idx)
 
     # Active vector & breach progress card
     card = pygame.Rect(inner.left, y, w, 78)
@@ -486,8 +500,7 @@ def draw_attacker_command_panel(
     )
     y += 22
 
-    game_over = outcome(state, CONFIG.game) is not Outcome.ONGOING
-    not_turn = state.side is not Side.ATTACKER or game_over
+    not_turn = not legal_targets
     max_list_bottom = inner.bottom - 52
 
     if observation.breach_target is not None:
@@ -513,13 +526,14 @@ def draw_attacker_command_panel(
             if y + 32 > max_list_bottom:
                 break
             nb_meta = metas[nb_idx]
-            nb_h = effective_hardness(state, nb_idx, CONFIG.game)
+            nb_h = _machine_hardness(observation.network, observation.patched, nb_idx)
             bid = f"atk_move_{nb_idx}"
             spec = ButtonSpec(
                 id=bid,
                 rect=pygame.Rect(inner.left, y, w, 30),
-                label=f"{nb_meta.code}" + (" [JEWEL]" if nb_idx == state.network.jewel else ""),
-                variant="red" if nb_idx == state.network.jewel else "slate",
+                label=f"{nb_meta.code}"
+                + (" [JEWEL]" if nb_idx == observation.network.jewel else ""),
+                variant="red" if nb_idx == observation.network.jewel else "slate",
                 right_tag=f"HRD:{nb_h}",
                 disabled=not_turn,
                 font_size=12,
@@ -537,7 +551,7 @@ def draw_attacker_command_panel(
         rect=pygame.Rect(inner.left, inner.bottom - 44, w, 40),
         label=auto_lbl,
         variant="amber",
-        disabled=not_turn or not legal_targets,
+        disabled=not_turn,
         font_size=13,
     )
     draw_tactical_button(
@@ -588,19 +602,27 @@ def draw_bottom_diagnostics_tray(
     rect: pygame.Rect,
     palette: ThemePalette,
     fonts: FontBook,
-    state: GameState,
+    network: Network,
+    turn: int,
+    side: Side,
+    breached_visible_count: int | None,
     seed: int,
     plies: int,
     fps_actual: float,
 ) -> None:
-    """Render the bottom diagnostics bar strictly from live core/ metrics."""
+    """Render the bottom diagnostics bar strictly from allowed view telemetry."""
     draw_alpha_rect(surface, rect, (9, 15, 23, 245))
     pygame.draw.line(surface, with_alpha(palette.cyan, 75), rect.topleft, (rect.right, rect.top), 1)
-    choke_cnt = len(chokepoints(state.network))
+    choke_cnt = len(chokepoints(network))
+    breach_txt = (
+        f"{breached_visible_count}/{network.size}"
+        if breached_visible_count is not None
+        else "HIDDEN"
+    )
     text = (
-        f"DIAGNOSTICS  |  SEED #{seed}  |  TURN {state.turn}/{CONFIG.game.turn_limit}  |  "
-        f"PLIES: {plies}  |  BREACHED: {len(state.breached)}/{state.network.size}  |  "
-        f"CHOKEPOINTS: {choke_cnt}  |  SIDE: {state.side.value.upper()}  |  "
+        f"DIAGNOSTICS  |  SEED #{seed}  |  TURN {turn}/{CONFIG.game.turn_limit}  |  "
+        f"PLIES: {plies}  |  BREACHED: {breach_txt}  |  "
+        f"CHOKEPOINTS: {choke_cnt}  |  SIDE: {side.value.upper()}  |  "
         f"FPS: {fps_actual:.0f}"
     )
     surf = fonts.get("mono", 11).render(text, True, (155, 176, 193))
@@ -792,7 +814,9 @@ def draw_tutorial_card(
     palette: ThemePalette,
     fonts: FontBook,
     vault: AssetVault,
-    state: GameState,
+    turn: int,
+    side: Side,
+    stage_label: str,
     hovered_id: str | None,
 ) -> list[ButtonSpec]:
     """Render the Explainable Rules Tutorial banner describing current turn state."""
@@ -803,11 +827,10 @@ def draw_tutorial_card(
         border_rgba=with_alpha(palette.cyan, 160),
     )
     buttons: list[ButtonSpec] = []
-    stage = derive_attack_stage(state)
     draw_badge_pill(
         surface,
         (rect.left + 12, rect.top + 6),
-        f"TUTORIAL COACH // {stage}",
+        f"TUTORIAL COACH // {stage_label}",
         palette.cyan,
         with_alpha(palette.cyan, 50),
         with_alpha(palette.cyan, 200),
@@ -815,14 +838,14 @@ def draw_tutorial_card(
         centered=False,
     )
 
-    if state.side is Side.DEFENDER:
+    if side is Side.DEFENDER:
         hint = (
-            f"Defender Turn {state.turn}: Watch noisy sensor alerts and protect Crown Jewel paths "
+            f"Defender Turn {turn}: Watch noisy sensor alerts and protect Crown Jewel paths "
             "using Patch (+2 hardness), Firewall (cuts link), or hidden Honeypot (+2T delay)."
         )
     else:
         hint = (
-            f"Attacker Turn {state.turn}: Advance to an open neighbor. Multi-turn hardness holds "
+            f"Attacker Turn {turn}: Advance to an open neighbor. Multi-turn hardness holds "
             "the intruder in place until breach_left reaches 0."
         )
     surface.blit(
@@ -855,9 +878,14 @@ def draw_side_panels_drawer(
     palette: ThemePalette,
     fonts: FontBook,
     vault: AssetVault,
-    state: GameState,
+    network: Network,
+    patched: frozenset[int],
+    firewalls_count: int,
+    honeypots: frozenset[int] | None,
+    triggered_count: int,
+    turn: int,
     metas: tuple[NodeVisualMeta, ...],
-    alerts: tuple[bool, ...],
+    alerts: tuple[bool, ...] | None,
     active_tab: DrawerTab,
     selected_node: int | None,
     hovered_id: str | None,
@@ -911,6 +939,7 @@ def draw_side_panels_drawer(
     body = fonts.get("body", 14)
     focus = selected_node if selected_node is not None and 0 <= selected_node < len(metas) else 0
     focus_meta = metas[focus]
+    eff_h = _machine_hardness(network, patched, focus)
 
     if active_tab == "peas":
         lines = [
@@ -931,36 +960,46 @@ def draw_side_panels_drawer(
             ("  S: Noisy alerts + triggered traps", palette.muted),
         ]
     elif active_tab == "sensors":
-        active_alerts = [metas[i].code for i, a in enumerate(alerts) if a]
+        if alerts is not None:
+            active_alerts = [metas[i].code for i, a in enumerate(alerts) if a]
+            sensor_state = "ALERT" if alerts[focus] else "NORMAL"
+            alerts_line = f"  {', '.join(active_alerts[:6]) or 'NONE'}"
+            alerts_hdr = f"ACTIVE ALERTS ({len(active_alerts)}):"
+        else:
+            sensor_state = "HIDDEN"
+            alerts_line = "  [HIDDEN IN ATTACKER VIEW]"
+            alerts_hdr = "ACTIVE ALERTS: [HIDDEN]"
+        trap_str = "HIDDEN" if honeypots is None else ("ARMED" if focus in honeypots else "NONE")
         lines = [
             (f"DETECTION RATE: {int(CONFIG.sensors.detection_rate * 100)}%", palette.cyan),
             (f"FALSE ALARM RATE: {int(CONFIG.sensors.false_alarm_rate * 100)}%", palette.amber),
-            (f"ACTIVE ALERTS ({len(active_alerts)}):", palette.red),
-            (f"  {', '.join(active_alerts[:6]) or 'NONE'}", palette.text),
+            (alerts_hdr, palette.red),
+            (alerts_line, palette.text),
             ("", palette.text),
             (f"SELECTED HOST: {focus_meta.code}", palette.violet),
-            (f"  SENSOR STATE: {'ALERT' if alerts[focus] else 'NORMAL'}", palette.text),
-            (f"  BASE HARDNESS: {state.network.hardness[focus]}T", palette.muted),
-            (f"  EFF HARDNESS: {effective_hardness(state, focus, CONFIG.game)}T", palette.cyan),
-            (f"  HONEYPOT TRAP: {'ARMED' if focus in state.honeypots else 'NONE'}", palette.muted),
+            (f"  SENSOR STATE: {sensor_state}", palette.text),
+            (f"  BASE HARDNESS: {network.hardness[focus]}T", palette.muted),
+            (f"  EFF HARDNESS: {eff_h}T", palette.cyan),
+            (f"  HONEYPOT TRAP: {trap_str}", palette.muted),
         ]
     elif active_tab == "observation":
+        hp_armed = len(honeypots) if honeypots is not None else "HIDDEN"
         lines = [
-            ("DEFENDER OBSERVATION BOUNDARY", palette.cyan),
-            (f"  Turn: {state.turn} / {CONFIG.game.turn_limit}", palette.text),
-            (f"  Patched Nodes: {len(state.patched)}", palette.text),
-            (f"  Firewalled Links: {len(state.firewalls)}", palette.text),
-            (f"  Honeypots Armed: {len(state.honeypots)}", palette.text),
-            (f"  Triggered Traps: {len(state.triggered)}", palette.violet),
-            ("  True Attacker Pos: [CONCEALED]", palette.amber),
+            ("OBSERVATION BOUNDARY", palette.cyan),
+            (f"  Turn: {turn} / {CONFIG.game.turn_limit}", palette.text),
+            (f"  Patched Nodes: {len(patched)}", palette.text),
+            (f"  Firewalled Links: {firewalls_count}", palette.text),
+            (f"  Honeypots Armed: {hp_armed}", palette.text),
+            (f"  Triggered Traps Known: {triggered_count}", palette.violet),
+            ("  Hidden Opponent State: [CONCEALED]", palette.amber),
         ]
     else:
-        chokes = chokepoints(state.network)
-        nbs = [metas[nb].code for nb in state.network.neighbours(focus)]
+        chokes = chokepoints(network)
+        nbs = [metas[nb].code for nb in network.neighbours(focus)]
         lines = [
-            (f"NETWORK GRAPH ({state.network.size} NODES)", palette.cyan),
-            (f"  Total Edges: {len(state.network.edges())}", palette.text),
-            (f"  Connected: {state.network.is_connected()}", palette.green),
+            (f"NETWORK GRAPH ({network.size} NODES)", palette.cyan),
+            (f"  Total Edges: {len(network.edges())}", palette.text),
+            (f"  Connected: {network.is_connected()}", palette.green),
             (f"  Articulation Chokepoints: {len(chokes)}", palette.amber),
             ("", palette.text),
             (f"NEIGHBORS OF {focus_meta.code}:", palette.violet),

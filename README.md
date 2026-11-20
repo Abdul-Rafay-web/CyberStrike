@@ -24,6 +24,12 @@ An **Attacker AI** infiltrates through an entry point attempting to breach the C
 
 ---
 
+### Screenshot
+
+![CyberStrike Battlefield](docs/phase2_battlefield.png)
+
+---
+
 ### Quick Start
 
 ```bash

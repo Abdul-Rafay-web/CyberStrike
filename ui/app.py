@@ -12,7 +12,7 @@ from core.actions import Action, Advance, Firewall, Honeypot, Pass, Patch
 from core.generator import generate_network
 from core.network import Network, make_edge
 from core.observation import observe_attacker, observe_defender
-from core.rules import Outcome, apply, is_terminal, outcome, utility
+from core.rules import IllegalActionError, Outcome, apply, is_terminal, outcome, utility
 from core.sensors import sample_alerts
 from core.state import GameState, Side, new_game
 from ui.battlefield import BattlefieldView, ToolMode, ViewMode
@@ -28,6 +28,7 @@ from ui.panels import (
     AuditEntry,
     DrawerTab,
     GameSettingsState,
+    derive_attack_stage_from_breached,
     draw_attacker_command_panel,
     draw_audit_log_panel,
     draw_bottom_diagnostics_tray,
@@ -275,11 +276,16 @@ class CyberStrikeApp:
         elif isinstance(action, Pass):
             self.logs.append(AuditEntry(before.turn, f"{tag} DEFENDER PASSED TURN", "info"))
 
-    def _apply_and_record(self, action: Action) -> None:
+    def _apply_and_record(self, action: Action) -> bool:
         if is_terminal(self.state, CONFIG.game):
-            return
+            return False
         before = self.state
-        after = apply(before, action, CONFIG.game)
+        try:
+            after = apply(before, action, CONFIG.game)
+        except IllegalActionError as exc:
+            self.logs.append(AuditEntry(before.turn, f"[ILLEGAL MOVE] {exc}", "red"))
+            self.active_tool = None
+            return False
         self.state = after
         self.plies += 1
         self.turn_seconds_left = 102.0
@@ -347,6 +353,7 @@ class CyberStrikeApp:
 
         self.history.append(HistoryFrame(self.state, self.alerts, list(self.logs)))
         self.replay_index = len(self.history) - 1
+        return True
 
     def _execute_ai_ply(self) -> None:
         if is_terminal(self.state, CONFIG.game):
@@ -364,7 +371,8 @@ class CyberStrikeApp:
         """Apply a human player's action and trigger AI reply or hot-seat curtain."""
         if is_terminal(self.state, CONFIG.game):
             return
-        self._apply_and_record(action)
+        if not self._apply_and_record(action):
+            return
         self.active_tool = None
         if is_terminal(self.state, CONFIG.game):
             self.hotseat_curtain = None
@@ -417,7 +425,12 @@ class CyberStrikeApp:
         self.sfx.configure(self.settings.sound_enabled, self.settings.master_volume)
 
         frame = self._displayed_frame()
-        self.battlefield.update(dt, frame.state, self.metas)
+        can_see_pos = self.screen_id == "attacker_game" or (
+            self.screen_id in ("spectator_game", "replay_viewer")
+            and self.settings.god_mode_spectator
+        )
+        visible_pos = frame.state.attacker_pos if can_see_pos else None
+        self.battlefield.update(dt, visible_pos, self.metas)
 
         if self.is_paused or self.show_settings or self.hotseat_curtain is not None:
             return
@@ -587,10 +600,67 @@ class CyberStrikeApp:
             "attacker"
             if self.screen_id == "attacker_game"
             else "spectator"
-            if self.screen_id == "spectator_game"
+            if self.screen_id in ("spectator_game", "replay_viewer")
             else "defender"
         )
         hud_mode = "replay" if self.screen_id == "replay_viewer" else view_mode
+
+        obs_def = (
+            observe_defender(state, frame.alerts, CONFIG.game)
+            if view_mode in ("defender", "spectator")
+            else None
+        )
+        obs_atk = observe_attacker(state, CONFIG.game) if view_mode == "attacker" else None
+        spectator_state = (
+            state if (view_mode == "spectator" and self.settings.god_mode_spectator) else None
+        )
+
+        if obs_atk is not None:
+            stage_label = derive_attack_stage_from_breached(
+                obs_atk.network, obs_atk.breached, obs_atk.breach_target
+            )
+            stock_rem = 7
+            breached_visible: int | None = len(obs_atk.breached)
+            node_count = obs_atk.network.size
+            net_ref = obs_atk.network
+            patched_ref = obs_atk.patched
+            fw_count = len(obs_atk.firewalls)
+            hp_ref: frozenset[int] | None = None
+            trig_count = len(obs_atk.known_honeypots)
+            alerts_ref: tuple[bool, ...] | None = None
+        elif spectator_state is not None:
+            stage_label = derive_attack_stage_from_breached(
+                spectator_state.network,
+                spectator_state.breached,
+                spectator_state.breach_target,
+            )
+            stock_rem = (
+                spectator_state.stock.patches
+                + spectator_state.stock.firewalls
+                + spectator_state.stock.honeypots
+            )
+            breached_visible = len(spectator_state.breached)
+            node_count = spectator_state.network.size
+            net_ref = spectator_state.network
+            patched_ref = spectator_state.patched
+            fw_count = len(spectator_state.firewalls)
+            hp_ref = spectator_state.honeypots
+            trig_count = len(spectator_state.triggered)
+            alerts_ref = frame.alerts
+        else:
+            assert obs_def is not None
+            stage_label = (
+                "INTRUDER CONFIRMED" if obs_def.intruder_known_at is not None else "ACTIVE DEFENSE"
+            )
+            stock_rem = obs_def.stock.patches + obs_def.stock.firewalls + obs_def.stock.honeypots
+            breached_visible = None
+            node_count = obs_def.network.size
+            net_ref = obs_def.network
+            patched_ref = obs_def.patched
+            fw_count = len(obs_def.firewalls)
+            hp_ref = obs_def.honeypots
+            trig_count = 1 if obs_def.intruder_known_at is not None else 0
+            alerts_ref = obs_def.alerts
 
         buttons = draw_top_hud_header(
             surface,
@@ -598,7 +668,10 @@ class CyberStrikeApp:
             self.palette,
             self.fonts,
             self.vault,
-            state,
+            state.turn,
+            node_count,
+            stock_rem,
+            stage_label,
             self.active_sector,
             self.active_seed,
             hud_mode,
@@ -654,7 +727,9 @@ class CyberStrikeApp:
                     self.palette,
                     self.fonts,
                     self.vault,
-                    state,
+                    state.turn,
+                    state.side,
+                    stage_label,
                     self._hovered_btn_id,
                 )
             )
@@ -668,7 +743,10 @@ class CyberStrikeApp:
                 pygame.Rect(0, h - tray_h, w, tray_h),
                 self.palette,
                 self.fonts,
-                state,
+                net_ref,
+                state.turn,
+                state.side,
+                breached_visible,
                 self.active_seed,
                 self.plies,
                 fps_actual,
@@ -683,19 +761,10 @@ class CyberStrikeApp:
         log_rect = pygame.Rect(12, bf_rect.bottom + 10, left_w, bottom_y - bf_rect.bottom - 10)
         cmd_rect = pygame.Rect(bf_rect.right + 12, top_y, right_w, bottom_y - top_y)
 
-        obs_def = observe_defender(state, frame.alerts, CONFIG.game)
-        obs_atk = observe_attacker(state, CONFIG.game)
-        legal_atk_targets: set[int] = set()
-        if view_mode == "attacker" and state.side is Side.ATTACKER and state.breach_target is None:
-            legal_atk_targets = {
-                act.target for act in obs_atk.legal_actions if isinstance(act, Advance)
-            }
-
         eff_tool: ToolMode = self.active_tool if self.screen_id == "defender_game" else None
         self.battlefield.draw(
             surface,
             bf_rect,
-            state,
             self.metas,
             self.palette,
             self.fonts,
@@ -704,9 +773,9 @@ class CyberStrikeApp:
             self.settings.god_mode_spectator,
             eff_tool,
             self.selected_node,
-            frame.alerts,
-            obs_def.intruder_known_at,
-            legal_atk_targets,
+            obs_def,
+            obs_atk,
+            spectator_state,
             self.active_seed,
             self.settings.show_heatmap,
             self.settings.show_breach_trace,
@@ -716,6 +785,7 @@ class CyberStrikeApp:
         draw_audit_log_panel(surface, log_rect, self.palette, self.fonts, frame.logs)
 
         if self.screen_id == "attacker_game":
+            assert obs_atk is not None
             buttons.extend(
                 draw_attacker_command_panel(
                     surface,
@@ -723,13 +793,13 @@ class CyberStrikeApp:
                     self.palette,
                     self.fonts,
                     self.vault,
-                    state,
                     self.metas,
                     obs_atk,
                     self._hovered_btn_id,
                 )
             )
         else:
+            assert obs_def is not None
             buttons.extend(
                 draw_defender_command_panel(
                     surface,
@@ -737,7 +807,6 @@ class CyberStrikeApp:
                     self.palette,
                     self.fonts,
                     self.vault,
-                    state,
                     self.metas,
                     obs_def,
                     eff_tool,
@@ -757,9 +826,14 @@ class CyberStrikeApp:
                     self.palette,
                     self.fonts,
                     self.vault,
-                    state,
+                    net_ref,
+                    patched_ref,
+                    fw_count,
+                    hp_ref,
+                    trig_count,
+                    state.turn,
                     self.metas,
-                    frame.alerts,
+                    alerts_ref,
                     self.drawer_tab,
                     self.selected_node,
                     self._hovered_btn_id,
@@ -847,7 +921,7 @@ class CyberStrikeApp:
             frame = self._displayed_frame()
             prev_node = self.battlefield.hovered_node
             self.battlefield.hovered_node = self.battlefield.pick_machine(
-                pos, self._battlefield_rect, self.metas, frame.state
+                pos, self._battlefield_rect, self.metas, frame.state.patched
             )
             if (
                 self.battlefield.hovered_node is not None
@@ -857,7 +931,11 @@ class CyberStrikeApp:
 
             if self.active_tool == "firewall" and self.screen_id == "defender_game":
                 self.battlefield.hovered_edge = self.battlefield.pick_edge(
-                    pos, self._battlefield_rect, self.metas, frame.state
+                    pos,
+                    self._battlefield_rect,
+                    self.metas,
+                    frame.state.network,
+                    frame.state.patched,
                 )
             else:
                 self.battlefield.hovered_edge = None
@@ -937,21 +1015,25 @@ class CyberStrikeApp:
             state = frame.state
 
             if self.screen_id == "defender_game" and self.active_tool == "firewall":
-                edge = self.battlefield.pick_edge(pos, self._battlefield_rect, self.metas, state)
-                if edge is not None and self.battlefield.is_edge_legal_for_firewall(
-                    state, edge, self.active_tool
-                ):
-                    self.submit_player_action(Firewall(edge[0], edge[1]))
-                    return
+                edge = self.battlefield.pick_edge(
+                    pos, self._battlefield_rect, self.metas, state.network, state.patched
+                )
+                if edge is not None:
+                    obs_def = observe_defender(state, frame.alerts, CONFIG.game)
+                    fw_act = Firewall(edge[0], edge[1])
+                    if fw_act in obs_def.legal_actions:
+                        self.submit_player_action(fw_act)
+                        return
 
-            picked = self.battlefield.pick_machine(pos, self._battlefield_rect, self.metas, state)
+            picked = self.battlefield.pick_machine(
+                pos, self._battlefield_rect, self.metas, state.patched
+            )
             if picked is not None:
                 self.selected_node = picked
                 if self.screen_id == "defender_game" and self.active_tool in ("patch", "honeypot"):
-                    if self.battlefield.is_node_legal_for_tool(state, picked, self.active_tool):
-                        act: Action = (
-                            Patch(picked) if self.active_tool == "patch" else Honeypot(picked)
-                        )
+                    obs_def = observe_defender(state, frame.alerts, CONFIG.game)
+                    act: Action = Patch(picked) if self.active_tool == "patch" else Honeypot(picked)
+                    if act in obs_def.legal_actions:
                         self.submit_player_action(act)
                         return
                 elif self.screen_id == "attacker_game" and state.side is Side.ATTACKER:
@@ -1254,6 +1336,7 @@ def run_window(
     pygame.display.set_caption("CyberStrike")
 
     app = CyberStrikeApp(seed=seed, start_screen=start_screen)
+    app.vault.warm_up()
     pygame.display.set_icon(app.vault.get_branding("window_icon_32"))
     clock = pygame.time.Clock()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -10,9 +11,10 @@ import pygame
 import pytest
 
 from config import CONFIG
-from core.actions import Firewall, Honeypot, Pass, Patch
+from core.actions import Advance, Firewall, Honeypot, Pass, Patch
 from core.chokepoints import chokepoints
 from core.generator import generate_network
+from core.observation import observe_attacker, observe_defender
 from core.rules import is_terminal
 from core.state import Side
 from ui.app import CyberStrikeApp, ScreenId, run_window
@@ -156,7 +158,9 @@ def test_defender_and_attacker_gameplay_and_picking() -> None:
         pad_top=app.battlefield.PAD_TOP,
         pad_bottom=app.battlefield.PAD_BOTTOM,
     )
-    picked = app.battlefield.pick_machine((px, py), app._battlefield_rect, app.metas, app.state)
+    picked = app.battlefield.pick_machine(
+        (px, py), app._battlefield_rect, app.metas, app.state.patched
+    )
     assert picked == 8
 
     # Apply Defender actions (Patch, Firewall, Honeypot, Pass) and verify state transitions
@@ -195,6 +199,73 @@ def test_attacker_perspective_and_escape_pause() -> None:
     assert app.is_paused is True
     app.handle_event(pygame.event.Event(pygame.KEYDOWN, {"key": pygame.K_ESCAPE}))
     assert app.is_paused is False
+
+
+def test_illegal_action_is_caught_and_logged() -> None:
+    app = CyberStrikeApp(seed=42, start_screen="defender_game")
+    assert app.state.side is Side.DEFENDER
+
+    # Attacker-only action during Defender turn must log [ILLEGAL MOVE] and not crash
+    app.submit_player_action(Advance(0))
+    assert app.logs
+    assert "[ILLEGAL MOVE]" in app.logs[-1].text
+
+    # Patching node 8 twice must reject the second attempt cleanly without spending extra stock
+    app.submit_player_action(Patch(8))
+    app.flush_pending_ai_reply()
+    stock_after_first = app.state.stock.patches
+    if not is_terminal(app.state, CONFIG.game):
+        app.submit_player_action(Patch(8))
+        assert app.state.stock.patches == stock_after_first
+        assert "[ILLEGAL MOVE]" in app.logs[-1].text
+
+
+def test_honeypots_stay_hidden_in_attacker_and_defender_observation_isolation() -> None:
+    app = CyberStrikeApp(seed=42, start_screen="defender_game")
+    app.submit_player_action(Honeypot(4))
+    assert 4 in app.state.honeypots
+
+    obs_atk = observe_attacker(app.state, CONFIG.game)
+    atk_scene = app.battlefield._build_scene("attacker", True, None, obs_atk, None)
+    assert atk_scene.honeypots == frozenset()
+    assert 4 not in atk_scene.triggered
+
+    obs_def = observe_defender(app.state, app.alerts, CONFIG.game)
+    def_scene = app.battlefield._build_scene("defender", False, obs_def, None, None)
+    assert def_scene.attacker_pos is None
+    assert def_scene.can_see_intruder is False
+    assert 4 in def_scene.honeypots
+
+
+def test_twenty_machine_render_performance() -> None:
+    screen = pygame.display.set_mode(CONFIG.theme.window_size)
+    app = CyberStrikeApp(seed=42, start_screen="defender_game")
+    app.vault.warm_up()
+    app.start_operation(
+        SetupConfig(
+            mode="human_vs_ai",
+            side=Side.DEFENDER,
+            seed=42,
+            map_size=20,
+            sector_name="TEST_20_NODE_NET",
+            use_canonical_13=False,
+        ),
+        target_screen="defender_game",
+    )
+    assert app.state.network.size == 20
+
+    # Warm up frame-level caches before timing steady-state 20-node rendering
+    for _ in range(3):
+        app.update(0.016)
+        app.render(screen)
+
+    t0 = time.perf_counter()
+    frames = 60
+    for _ in range(frames):
+        app.update(0.016)
+        app.render(screen)
+    avg_frame_sec = (time.perf_counter() - t0) / frames
+    assert avg_frame_sec < 0.03
 
 
 def test_run_window_headless_smoke() -> None:

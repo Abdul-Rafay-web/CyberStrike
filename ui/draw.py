@@ -12,6 +12,11 @@ AccentKind = Literal["cyan", "amber", "violet", "red", "slate"]
 ButtonVariant = Literal["cyan", "amber", "red", "violet", "slate"]
 ButtonVisualState = Literal["normal", "hover", "pressed", "disabled"]
 
+_SCANLINE_CACHE: dict[tuple[int, int, int], pygame.Surface] = {}
+_RING_CACHE: dict[tuple[int, int, RGB, int, int], pygame.Surface] = {}
+_GRAD_CACHE: dict[tuple[int, int, RGB], pygame.Surface] = {}
+_MAX_CACHE_ENTRIES = 256
+
 
 @dataclass(slots=True)
 class ButtonSpec:
@@ -72,13 +77,19 @@ def draw_alpha_rect(
 
 
 def draw_scanlines(surface: pygame.Surface, rect: pygame.Rect, alpha: int = 8) -> None:
-    """Draw subtle horizontal scanlines clipped inside rect."""
+    """Blit pre-rendered horizontal scanlines clipped inside rect."""
     if rect.width <= 0 or rect.height <= 0 or alpha <= 0:
         return
-    stripe = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
-    line_col = (255, 255, 255, alpha)
-    for y in range(0, rect.height, 4):
-        pygame.draw.line(stripe, line_col, (0, y), (rect.width - 1, y), 1)
+    key = (rect.width, rect.height, alpha)
+    stripe = _SCANLINE_CACHE.get(key)
+    if stripe is None:
+        if len(_SCANLINE_CACHE) >= _MAX_CACHE_ENTRIES:
+            _SCANLINE_CACHE.clear()
+        stripe = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+        line_col = (255, 255, 255, alpha)
+        for y in range(0, rect.height, 4):
+            pygame.draw.line(stripe, line_col, (0, y), (rect.width - 1, y), 1)
+        _SCANLINE_CACHE[key] = stripe
     surface.blit(stripe, rect.topleft)
 
 
@@ -162,11 +173,17 @@ def draw_tactical_panel(
     if sub_header:
         sub_col = accent_rgb(palette, sub_accent)
         sub_rect = pygame.Rect(rect.left + 1, cursor_y, max(1, rect.width - 2), 24)
-        grad = pygame.Surface((sub_rect.width, sub_rect.height), pygame.SRCALPHA)
-        for px in range(sub_rect.width):
-            ratio = 1.0 - (px / max(1, sub_rect.width))
-            a = int(58 * (ratio**1.35))
-            pygame.draw.line(grad, with_alpha(sub_col, a), (px, 0), (px, sub_rect.height - 1))
+        g_key = (sub_rect.width, sub_rect.height, sub_col)
+        grad = _GRAD_CACHE.get(g_key)
+        if grad is None:
+            if len(_GRAD_CACHE) >= _MAX_CACHE_ENTRIES:
+                _GRAD_CACHE.clear()
+            grad = pygame.Surface((sub_rect.width, sub_rect.height), pygame.SRCALPHA)
+            for px in range(sub_rect.width):
+                ratio = 1.0 - (px / max(1, sub_rect.width))
+                a = int(58 * (ratio**1.35))
+                pygame.draw.line(grad, with_alpha(sub_col, a), (px, 0), (px, sub_rect.height - 1))
+            _GRAD_CACHE[g_key] = grad
         surface.blit(grad, sub_rect.topleft)
         pygame.draw.line(
             surface,
@@ -438,30 +455,39 @@ def draw_iso_ellipse_ring(
         return
     pad = width + 3
     w, h = rx * 2 + pad * 2, ry * 2 + pad * 2
-    ring_surf = pygame.Surface((w, h), pygame.SRCALPHA)
     cx, cy = w // 2, h // 2
-    rgba = with_alpha(color, alpha)
 
     if not dashed:
-        pygame.draw.ellipse(
-            ring_surf,
-            rgba,
-            pygame.Rect(cx - rx, cy - ry, rx * 2, ry * 2),
-            width=width,
-        )
-    else:
-        segments = 16
-        step = (2.0 * math.pi) / segments
-        for i in range(segments):
-            if i % 2 == 1:
-                continue
-            a0 = i * step + phase
-            a1 = a0 + step * 0.65
-            pts: list[tuple[float, float]] = []
-            for k in range(6):
-                ang = a0 + (a1 - a0) * (k / 5.0)
-                pts.append((cx + rx * math.cos(ang), cy + ry * math.sin(ang)))
-            pygame.draw.lines(ring_surf, rgba, False, pts, width)
+        r_key = (rx, ry, color, alpha, width)
+        ring_surf = _RING_CACHE.get(r_key)
+        if ring_surf is None:
+            if len(_RING_CACHE) >= _MAX_CACHE_ENTRIES:
+                _RING_CACHE.clear()
+            ring_surf = pygame.Surface((w, h), pygame.SRCALPHA)
+            pygame.draw.ellipse(
+                ring_surf,
+                with_alpha(color, alpha),
+                pygame.Rect(cx - rx, cy - ry, rx * 2, ry * 2),
+                width=width,
+            )
+            _RING_CACHE[r_key] = ring_surf
+        surface.blit(ring_surf, (center[0] - cx, center[1] - cy))
+        return
+
+    ring_surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    rgba = with_alpha(color, alpha)
+    segments = 16
+    step = (2.0 * math.pi) / segments
+    for i in range(segments):
+        if i % 2 == 1:
+            continue
+        a0 = i * step + phase
+        a1 = a0 + step * 0.65
+        pts: list[tuple[float, float]] = []
+        for k in range(6):
+            ang = a0 + (a1 - a0) * (k / 5.0)
+            pts.append((cx + rx * math.cos(ang), cy + ry * math.sin(ang)))
+        pygame.draw.lines(ring_surf, rgba, False, pts, width)
 
     surface.blit(ring_surf, (center[0] - cx, center[1] - cy))
 

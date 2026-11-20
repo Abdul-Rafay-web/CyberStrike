@@ -228,6 +228,36 @@ class AssetVault:
         self._cover_cache: dict[tuple[str, int, int], pygame.Surface] = {}
         self._contain_cache: dict[tuple[str, int, int], pygame.Surface] = {}
         self._grid_tiles: dict[tuple[int, int, int], pygame.Surface] = {}
+        self._warmed_up: bool = False
+
+    def warm_up(self) -> None:
+        """Load core UI images once and convert them to display format via convert_alpha()."""
+        if self._warmed_up:
+            return
+        if pygame.display.get_surface() is not None:
+            # Convert any raw surfaces loaded before display initialization.
+            for path, surf in list(self._raw.items()):
+                self._raw[path] = (
+                    surf.convert_alpha() if path.suffix.lower() == ".png" else surf.convert()
+                )
+            self._scaled.clear()
+            self._tinted.clear()
+            self._cover_cache.clear()
+            self._contain_cache.clear()
+            self._grid_tiles.clear()
+
+        for state_key in self.MACHINE_FILES:
+            for sz in (58, 68, 76, 82, 90):
+                self.get_machine(state_key, sz)
+        for icon in self.ICON_NAMES:
+            self.get_icon(icon, size=16)
+        for ef in self.EFFECT_NAMES:
+            self.get_effect(ef, (176, 104))
+        self.get_branding("window_icon_32")
+        self.get_branding("window_icon_256", size=24)
+        self.get_background_raw("warroom_console_4k.jpg")
+        self.get_background_raw("bg_isometric_grid.png")
+        self._warmed_up = True
 
     def _load_raw(self, path: Path) -> pygame.Surface:
         cached = self._raw.get(path)
