@@ -10,6 +10,7 @@ from utils.logging_setup import setup_logging
 
 log = logging.getLogger("Cyberstrike")
 
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cyberstrike", description="CyberStrike network infiltration game"
@@ -42,7 +43,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         log.info("play requested", extra={"data": {"seed": args.seed}})
         from ui.app import run_window  # loaded only here, so headless commands skip pygame
 
-        run_window()
+        run_window(seed=args.seed)
     elif args.command == "tournament":
         from experiments.random_games import run_random_games
 
