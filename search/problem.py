@@ -29,7 +29,16 @@ class RouteProblem:
         return sum(self.entry_cost[machine] for machine in path[1:])
 
 
-def build_problem(
+@dataclass(frozen=True, slots=True)
+class RouteCosts:
+    """The numbers every route calculation needs, built from one set of cost rules."""
+
+    open_adjacency: tuple[tuple[int, ...], ...]
+    entry_cost: tuple[int, ...]
+    floor_cost: tuple[int, ...]
+
+
+def route_costs(
     network: Network,
     position: int,
     breach_target: int | None,
@@ -38,7 +47,7 @@ def build_problem(
     patched: Collection[int],
     firewalls: Collection[Edge],
     config: GameConfig = CONFIG.game,
-) -> RouteProblem:
+) -> RouteCosts:
     size = network.size
     entry_cost: list[int] = []
     floor_cost: list[int] = []
@@ -51,18 +60,34 @@ def build_problem(
             bonus = config.patch_hardness_bonus if machine in patched else 0
             entry_cost.append(base + bonus)
             floor_cost.append(base)
+    open_adjacency = [
+        tuple(other for other in network.neighbours(m) if make_edge(m, other) not in firewalls)
+        for m in range(size)
+    ]
     if breach_target is not None:
         entry_cost[breach_target] = breach_left
         floor_cost[breach_target] = min(floor_cost[breach_target], breach_left)
+        open_adjacency[position] = (breach_target,)
+    return RouteCosts(tuple(open_adjacency), tuple(entry_cost), tuple(floor_cost))
 
-    open_adjacency = tuple(
-        tuple(other for other in network.neighbours(m) if make_edge(m, other) not in firewalls)
-        for m in range(size)
+
+def build_problem(
+    network: Network,
+    position: int,
+    breach_target: int | None,
+    breach_left: int,
+    breached: Collection[int],
+    patched: Collection[int],
+    firewalls: Collection[Edge],
+    config: GameConfig = CONFIG.game,
+) -> RouteProblem:
+    costs = route_costs(
+        network, position, breach_target, breach_left, breached, patched, firewalls, config
     )
-    relaxed = cost_to_goal(network.adjacency, floor_cost, network.jewel)
+    relaxed = cost_to_goal(network.adjacency, costs.floor_cost, network.jewel)
     return RouteProblem(
-        adjacency=open_adjacency,
-        entry_cost=tuple(entry_cost),
+        adjacency=costs.open_adjacency,
+        entry_cost=costs.entry_cost,
         start=position,
         goal=network.jewel,
         heuristic=relaxed,

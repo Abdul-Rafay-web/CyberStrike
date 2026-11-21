@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from config import CONFIG, AppConfig
-from core.chokepoints import chokepoints
+from core.chokepoints import can_be_cut_off, chokepoints
 from core.network import Edge, Network, bfs_distances, make_edge
 from utils.rng import STREAM_MAP, make_rng
 
@@ -75,6 +75,6 @@ def _try_generate(rng: np.random.Generator, size: int, config: AppConfig) -> Net
     hardness[jewel] = game.max_hardness
 
     network = Network.from_edges(size, edges, hardness, entry, jewel)
-    if chokepoints(network):
+    if chokepoints(network) or can_be_cut_off(network, game.stock.firewalls):
         return None
     return network

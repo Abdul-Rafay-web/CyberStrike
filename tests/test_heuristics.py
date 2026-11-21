@@ -50,3 +50,11 @@ def test_a_wrong_sized_heuristic_is_rejected() -> None:
     problem = problem_from_state(new_game(generate_network(1)))
     with pytest.raises(ValueError):
         astar(problem, heuristic=(0, 0))
+
+
+def test_cost_to_goal_respects_one_way_links() -> None:
+    # Machine 0 can only step to 1, and machine 1 can step on to 2 or back to 0.
+    adjacency = ((1,), (0, 2), ())
+    assert cost_to_goal(adjacency, (1, 1, 1), goal=2) == (2, 1, 0)
+    # Nothing can step onto machine 0 except machine 1, so from 2 the goal is not reachable.
+    assert cost_to_goal(((1,), (2,), ()), (1, 1, 1), goal=0)[2] >= 10**6

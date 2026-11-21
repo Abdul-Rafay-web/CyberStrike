@@ -1,7 +1,7 @@
 import pytest
 
 from config import CONFIG
-from core.chokepoints import chokepoints
+from core.chokepoints import can_be_cut_off, chokepoints
 from core.generator import generate_network
 from core.network import bfs_distances
 
@@ -26,6 +26,7 @@ def test_every_generated_map_is_valid(size: int) -> None:
         assert net.size == size
         assert net.is_connected()
         assert chokepoints(net) == frozenset()
+        assert not can_be_cut_off(net, game.stock.firewalls)
         assert bfs_distances(net.adjacency, net.entry)[net.jewel] >= gen.min_entry_jewel_hops
         assert all(game.min_hardness <= h <= game.max_hardness for h in net.hardness)
         assert net.hardness[net.entry] == game.min_hardness

@@ -65,17 +65,22 @@ def is_terminal(state: GameState, config: GameConfig = CONFIG.game) -> bool:
     return outcome(state, config) is not Outcome.ONGOING
 
 
-def utility(state: GameState, config: GameConfig = CONFIG.game) -> int:
-    """Score of a finished game from the attacker's point of view."""
-    result = outcome(state, config)
-    if result is Outcome.ONGOING:
-        raise ValueError("the game is not over yet")
+def final_score(state: GameState, result: Outcome, config: GameConfig = CONFIG.game) -> int:
+    """Score of a finished game from the attacker's point of view, for a known result."""
     turns_used = min(state.turn, config.turn_limit)
     value = config.win_value - config.turn_penalty * turns_used
     return value if result is Outcome.ATTACKER_WINS else -value
 
 
-def _attacker_actions(state: GameState) -> list[Action]:
+def utility(state: GameState, config: GameConfig = CONFIG.game) -> int:
+    """Score of a finished game from the attacker's point of view."""
+    result = outcome(state, config)
+    if result is Outcome.ONGOING:
+        raise ValueError("the game is not over yet")
+    return final_score(state, result, config)
+
+
+def attacker_actions(state: GameState) -> list[Action]:
     if state.breach_target is not None:
         return [Advance(state.breach_target)]
     return [Advance(other) for other in open_neighbours(state, state.attacker_pos)]
@@ -108,11 +113,12 @@ def _defender_actions(state: GameState) -> list[Action]:
     actions.append(Pass())
     return actions
 
+
 def legal_actions(state: GameState, config: GameConfig = CONFIG.game) -> list[Action]:
     if is_terminal(state, config):
         return []
     if state.side is Side.ATTACKER:
-        return _attacker_actions(state)
+        return attacker_actions(state)
     return _defender_actions(state)
 
 
@@ -158,6 +164,13 @@ def apply(
         raise IllegalActionError(
             f"{action} is not legal for the {state.side.value} on turn {state.turn}"
         )
+    return apply_unchecked(state, action, config)
+
+
+def apply_unchecked(
+    state: GameState, action: Action, config: GameConfig = CONFIG.game
+) -> GameState:
+    """Apply a move that is already known to be legal. Search uses this to skip the check."""
     match action:
         case Advance(target=target):
             return _advance(state, target, config)

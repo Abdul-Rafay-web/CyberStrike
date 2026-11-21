@@ -29,7 +29,8 @@ class GeneratorConfig:
     edge_factor: float = 1.5
     min_entry_jewel_hops: int = 3
     hardness_weights: tuple[float, float, float] = (0.4, 0.4, 0.2)
-    max_attempts: int = 200
+    max_attempts: int = 1000
+
 
 @dataclass(frozen=True)
 class SensorConfig:
@@ -41,7 +42,9 @@ class SensorConfig:
 class SearchConfig:
     max_depth_plies: int = 6
     time_budget_seconds: float = 2.0
-    defender_reply_radius: int = 2
+    defender_reply_radius: int = 1
+    max_defender_replies: int = 12
+    commit_margin: float = 25.0
 
 
 @dataclass(frozen=True)
