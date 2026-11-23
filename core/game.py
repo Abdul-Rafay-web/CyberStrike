@@ -11,7 +11,7 @@ from core.actions import Action
 from core.network import Network
 from core.observation import observe_attacker, observe_defender
 from core.rules import Outcome, apply, is_terminal, outcome, utility
-from core.sensors import sample_alerts
+from core.sensors import RateSensor, Sensor
 from core.state import GameState, Side, new_game
 
 StepCallback = Callable[[GameState, Action, GameState], None]
@@ -32,9 +32,11 @@ def play_game(
     sensor_rng: np.random.Generator,
     config: AppConfig = CONFIG,
     on_step: StepCallback | None = None,
+    sensor: Sensor | None = None,
 ) -> GameResult:
     """Play one full game and return the result. Players only ever see their observation."""
     game = config.game
+    sensor = sensor if sensor is not None else RateSensor(config.sensors)
     state = new_game(network, game)
     plies = 0
     max_plies = 2 * game.turn_limit + 2
@@ -45,7 +47,7 @@ def play_game(
         if state.side is Side.ATTACKER:
             action = attacker.choose_action(observe_attacker(state, game))
         else:
-            alerts = sample_alerts(state, sensor_rng, config.sensors)
+            alerts = sensor.alerts(state, sensor_rng)
             action = defender.choose_action(observe_defender(state, alerts, game))
         following = apply(state, action, game)
         if on_step is not None:

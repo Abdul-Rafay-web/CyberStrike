@@ -39,6 +39,17 @@ class SensorConfig:
 
 
 @dataclass(frozen=True)
+class MLConfig:
+    rows: int = 10_000
+    attack_share: float = 0.2
+    train_share: float = 0.6
+    validation_share: float = 0.2
+    folds: int = 5
+    loocv_rows: int = 300
+    smoothing: float = 1.0
+
+
+@dataclass(frozen=True)
 class SearchConfig:
     max_depth_plies: int = 6
     time_budget_seconds: float = 2.0
@@ -75,6 +86,7 @@ class AppConfig:
     game: GameConfig = field(default_factory=GameConfig)
     generator: GeneratorConfig = field(default_factory=GeneratorConfig)
     sensors: SensorConfig = field(default_factory=SensorConfig)
+    ml: MLConfig = field(default_factory=MLConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     seeds: SeedConfig = field(default_factory=SeedConfig)
     theme: Theme = field(default_factory=Theme)
