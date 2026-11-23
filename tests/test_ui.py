@@ -270,3 +270,19 @@ def test_twenty_machine_render_performance() -> None:
 
 def test_run_window_headless_smoke() -> None:
     run_window(seed=42, start_screen="main_menu", max_frames=2)
+
+
+def test_live_belief_heatmap_updates_on_defender_turns() -> None:
+    surf = pygame.Surface(CONFIG.theme.window_size)
+    app = CyberStrikeApp(seed=42, start_screen="defender_game")
+    assert len(app.belief) == app.state.network.size
+    assert sum(app.belief) == pytest.approx(1.0)
+    before = app.belief
+
+    app.submit_player_action(Pass())
+    app.flush_pending_ai_reply()
+    assert len(app.belief) == app.state.network.size
+    assert sum(app.belief) == pytest.approx(1.0)
+    assert app.belief != before
+    app.render(surf)
+

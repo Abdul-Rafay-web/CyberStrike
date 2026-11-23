@@ -6,6 +6,7 @@ from typing import Literal
 
 import pygame
 
+from agents.belief_defender import BeliefSession, create_belief_session
 from agents.random_agents import RandomAttacker, RandomDefender
 from config import CONFIG
 from core.actions import Action, Advance, Firewall, Honeypot, Pass, Patch
@@ -77,6 +78,7 @@ class HistoryFrame:
     state: GameState
     alerts: tuple[bool, ...]
     logs: list[AuditEntry]
+    belief: tuple[float, ...] = ()
 
 
 class CyberStrikeApp:
@@ -203,7 +205,11 @@ class CyberStrikeApp:
             ),
         ]
         self.alerts: tuple[bool, ...] = sample_alerts(self.state, self.sensor_rng, CONFIG.sensors)
-        self.history: list[HistoryFrame] = [HistoryFrame(self.state, self.alerts, list(self.logs))]
+        self.belief_session: BeliefSession = create_belief_session(network, CONFIG.sensors)
+        self.belief: tuple[float, ...] = self.belief_session.probabilities
+        self.history: list[HistoryFrame] = [
+            HistoryFrame(self.state, self.alerts, list(self.logs), self.belief)
+        ]
         self.replay_index = 0
         self.replay_playing = False
 
@@ -327,6 +333,9 @@ class CyberStrikeApp:
         # Sample fresh noisy sensor alerts when entering Defender turn
         if after.side is Side.DEFENDER and not is_terminal(after, CONFIG.game):
             self.alerts = sample_alerts(after, self.sensor_rng, CONFIG.sensors)
+            self.belief = self.belief_session.step(
+                observe_defender(after, self.alerts, CONFIG.game)
+            )
             alert_codes = [self.metas[i].code for i, flag in enumerate(self.alerts) if flag]
             if alert_codes:
                 self.logs.append(
@@ -351,7 +360,7 @@ class CyberStrikeApp:
                 AuditEntry(after.turn, "CROWN JEWEL BREACHED — ATTACKER VICTORY", "red")
             )
 
-        self.history.append(HistoryFrame(self.state, self.alerts, list(self.logs)))
+        self.history.append(HistoryFrame(self.state, self.alerts, list(self.logs), self.belief))
         self.replay_index = len(self.history) - 1
         return True
 
@@ -780,6 +789,7 @@ class CyberStrikeApp:
             self.settings.show_heatmap,
             self.settings.show_breach_trace,
             self.settings.show_hardness_badges,
+            belief=frame.belief,
         )
 
         draw_audit_log_panel(surface, log_rect, self.palette, self.fonts, frame.logs)

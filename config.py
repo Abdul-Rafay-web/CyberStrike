@@ -50,6 +50,13 @@ class MLConfig:
 
 
 @dataclass(frozen=True)
+class BeliefConfig:
+    stay_base: float = 0.25
+    floor: float = 1e-6
+    eval_games: int = 100
+
+
+@dataclass(frozen=True)
 class SearchConfig:
     max_depth_plies: int = 6
     time_budget_seconds: float = 2.0
@@ -87,6 +94,7 @@ class AppConfig:
     generator: GeneratorConfig = field(default_factory=GeneratorConfig)
     sensors: SensorConfig = field(default_factory=SensorConfig)
     ml: MLConfig = field(default_factory=MLConfig)
+    belief: BeliefConfig = field(default_factory=BeliefConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     seeds: SeedConfig = field(default_factory=SeedConfig)
     theme: Theme = field(default_factory=Theme)

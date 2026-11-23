@@ -20,6 +20,7 @@ from ui.draw import (
     draw_iso_ellipse_ring,
     draw_target_reticle_ring,
 )
+from ui.heatmap import draw_belief_heatmap, draw_belief_top3_card
 from ui.layout import NodeVisualMeta, project_node_to_screen
 from ui.theme import RGB, AssetVault, FontBook, ThemePalette, with_alpha
 
@@ -411,6 +412,7 @@ class BattlefieldView:
         show_heatmap: bool,
         show_breach_trace: bool,
         show_hardness_badges: bool,
+        belief: tuple[float, ...] | None = None,
     ) -> None:
         """Render the battlefield strictly from the view's permitted observation."""
         scene = self._build_scene(view_mode, god_mode, obs_def, obs_atk, spectator_state)
@@ -440,6 +442,10 @@ class BattlefieldView:
 
             if effective_heatmap:
                 self._draw_heatmap_rings(surface, scene, metas, palette, fonts, vault)
+                if belief:
+                    draw_belief_heatmap(
+                        surface, metas, self._base_pts, belief, palette, fonts, self.time_s
+                    )
 
             self._draw_pedestal_rings(surface, scene, metas, view_mode, palette)
 
@@ -487,6 +493,9 @@ class BattlefieldView:
                     fonts,
                     view_mode,
                 )
+
+            if effective_heatmap and belief:
+                draw_belief_top3_card(surface, rect, metas, belief, palette, fonts)
 
             self._draw_top_chrome(surface, rect, scene.network, seed, active_tool, palette, fonts)
             pygame.draw.rect(surface, with_alpha(palette.cyan, 80), rect, 1)
