@@ -620,6 +620,7 @@ def draw_bottom_diagnostics_tray(
     seed: int,
     plies: int,
     fps_actual: float,
+    diagnostics_note: str | None = None,
 ) -> None:
     """Render the bottom diagnostics bar strictly from allowed view telemetry."""
     draw_alpha_rect(surface, rect, (9, 15, 23, 245))
@@ -630,11 +631,12 @@ def draw_bottom_diagnostics_tray(
         if breached_visible_count is not None
         else "HIDDEN"
     )
+    extra = f"  |  {diagnostics_note}" if diagnostics_note else ""
     text = (
         f"DIAGNOSTICS  |  SEED #{seed}  |  TURN {turn}/{CONFIG.game.turn_limit}  |  "
         f"PLIES: {plies}  |  BREACHED: {breach_txt}  |  "
         f"CHOKEPOINTS: {choke_cnt}  |  SIDE: {side.value.upper()}  |  "
-        f"FPS: {fps_actual:.0f}"
+        f"FPS: {fps_actual:.0f}{extra}"
     )
     surf = fonts.get("mono", 11).render(text, True, (155, 176, 193))
     surface.blit(surf, (rect.left + 14, rect.centery - surf.get_height() // 2))

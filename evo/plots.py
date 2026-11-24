@@ -13,6 +13,7 @@ from matplotlib.figure import Figure  # noqa: E402
 
 from config import CONFIG  # noqa: E402
 from evo.genetic import GenerationRecord  # noqa: E402
+from evo.localsearch import SearchStep  # noqa: E402
 
 THEME = CONFIG.theme
 
@@ -113,4 +114,46 @@ def plot_regression_fit(
     ax.set_ylabel("linear regression predicted turns")
     ax.legend(facecolor=PANEL, edgecolor=MUTED, labelcolor=TEXT)
     _style(ax, f"Linear regression surrogate on held-out maps (R^2 = {r2:.3f})")
+    _save(fig, path)
+
+
+def plot_local_search_curve(
+    history: tuple[SearchStep, ...],
+    default_test_score: float,
+    tuned_test_score: float,
+    path: Path,
+) -> None:
+    """Playbook Chart #7: local search score per iteration + held-out test comparison."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.2, 4.6), facecolor=BACKGROUND)
+
+    steps = [s.iteration for s in history]
+    ax1.plot(
+        steps,
+        [s.best_score for s in history],
+        color=CYAN,
+        marker="o",
+        linewidth=2.2,
+        label="Best train score",
+    )
+    ax1.plot(
+        steps,
+        [s.current_score for s in history],
+        color=VIOLET,
+        linestyle="--",
+        linewidth=1.6,
+        label="Current candidate",
+    )
+    ax1.set_xlabel("local search step")
+    ax1.set_ylabel("mean utility on training seeds")
+    ax1.legend(facecolor=PANEL, edgecolor=MUTED, labelcolor=TEXT)
+    _style(ax1, "Hill climbing with random restarts (dev seeds)")
+
+    labels = ["Default weights", "Tuned weights"]
+    vals = [default_test_score, tuned_test_score]
+    pos = np.arange(len(labels))
+    ax2.bar(pos, vals, width=0.45, color=[ORANGE, CYAN])
+    ax2.set_xticks(pos, labels)
+    ax2.set_ylabel("mean utility on held-out test seeds (1000+)")
+    _style(ax2, "Generalization on unseen test seeds")
+
     _save(fig, path)

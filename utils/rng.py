@@ -8,6 +8,7 @@ STREAM_AGENTS = 2
 STREAM_DEFENDER = 3
 STREAM_DATA = 5
 STREAM_EVO = 6
+STREAM_LOCAL_SEARCH = 7
 
 def make_rng(seed: int, stream: int = STREAM_MAP) -> np.random.Generator:
     """Return a random generator for one seed and one named stream."""

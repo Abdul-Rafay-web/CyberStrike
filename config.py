@@ -80,6 +80,19 @@ class EvoConfig:
 
 
 @dataclass(frozen=True)
+class LocalSearchConfig:
+    restarts: int = 2
+    max_iterations: int = 12
+    step_sizes: tuple[float, float, float, float] = (5.0, 10.0, 0.5, 4.0)
+    train_seeds_count: int = 30
+    test_seeds_count: int = 40
+    eval_depth: int = 2
+    eval_time_budget: float = 0.25
+    sa_initial_temp: float = 35.0
+    sa_cooling: float = 0.85
+
+
+@dataclass(frozen=True)
 class SearchConfig:
     max_depth_plies: int = 6
     time_budget_seconds: float = 2.0
@@ -120,6 +133,7 @@ class AppConfig:
     belief: BeliefConfig = field(default_factory=BeliefConfig)
     csp: CSPConfig = field(default_factory=CSPConfig)
     evo: EvoConfig = field(default_factory=EvoConfig)
+    local_search: LocalSearchConfig = field(default_factory=LocalSearchConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     seeds: SeedConfig = field(default_factory=SeedConfig)
     theme: Theme = field(default_factory=Theme)

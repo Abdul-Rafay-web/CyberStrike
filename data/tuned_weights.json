@@ -1,0 +1,11 @@
+{
+  "weights": {
+    "patch": 20.0,
+    "firewall": 50.0,
+    "exits": 1.0,
+    "honeypot": 10.0
+  },
+  "train_score": 776.667,
+  "default_test_score": 832.5,
+  "tuned_test_score": 831.5
+}
