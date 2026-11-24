@@ -249,6 +249,17 @@ def draw_defender_command_panel(
         accent="cyan",
         sub_accent="amber",
     )
+    # CSP solver status light in panel header (green/cyan when resources ready, amber when spent)
+    stock_left = (
+        observation.stock.patches + observation.stock.firewalls + observation.stock.honeypots
+    )
+    csp_col = palette.cyan if stock_left > 0 else palette.amber
+    csp_label = "CSP: READY" if stock_left > 0 else "CSP: IDLE"
+    csp_surf = fonts.get("mono", 10, bold=True).render(csp_label, True, csp_col)
+    light_x = rect.right - csp_surf.get_width() - 22
+    light_y = rect.top + 13
+    pygame.draw.circle(surface, csp_col, (light_x, light_y), 4)
+    surface.blit(csp_surf, (light_x + 8, rect.top + 7))
     buttons: list[ButtonSpec] = []
     y = inner.top + 4
     w = inner.width

@@ -57,6 +57,15 @@ class BeliefConfig:
 
 
 @dataclass(frozen=True)
+class CSPConfig:
+    routes_to_cover: int = 3
+    max_search_steps: int = 50_000
+    bench_instances: int = 100
+    bench_sizes: tuple[int, ...] = (10, 15, 20)
+    matchup_games: int = 300
+
+
+@dataclass(frozen=True)
 class SearchConfig:
     max_depth_plies: int = 6
     time_budget_seconds: float = 2.0
@@ -95,6 +104,7 @@ class AppConfig:
     sensors: SensorConfig = field(default_factory=SensorConfig)
     ml: MLConfig = field(default_factory=MLConfig)
     belief: BeliefConfig = field(default_factory=BeliefConfig)
+    csp: CSPConfig = field(default_factory=CSPConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     seeds: SeedConfig = field(default_factory=SeedConfig)
     theme: Theme = field(default_factory=Theme)
