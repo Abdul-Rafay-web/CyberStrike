@@ -28,6 +28,7 @@ from ui.layout import (
     MAP_PRESETS,
     MapPreset,
     NodeVisualMeta,
+    all_map_presets,
     build_canonical_13_network,
     compute_network_layout,
     project_node_to_screen,
@@ -48,6 +49,7 @@ class SetupConfig:
     map_size: int = 13
     sector_name: str = "INTRA_NET_ALPHA_09"
     use_canonical_13: bool = True
+    evolved_map_path: str | None = None
 
 
 def _draw_network_preview(
@@ -707,7 +709,7 @@ def draw_map_library_screen(
     # Left list of preset cards
     ly = 96
     lw = 445
-    for preset in MAP_PRESETS:
+    for preset in all_map_presets():
         crect = pygame.Rect(52, ly, lw, 118)
         active = preset.id == selected_preset.id
         bid = f"maps_select_{preset.id}"

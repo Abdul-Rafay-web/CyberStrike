@@ -22,8 +22,10 @@ from ui.layout import (
     MAP_PRESETS,
     MapPreset,
     NodeVisualMeta,
+    all_map_presets,
     build_canonical_13_network,
     compute_network_layout,
+    load_network_from_json,
 )
 from ui.panels import (
     AuditEntry,
@@ -148,7 +150,15 @@ class CyberStrikeApp:
         # Initialize default match state ready for quick launch
         self.start_operation(self.setup_cfg, target_screen=start_screen)
 
-    def _build_network(self, size: int, seed: int, canonical: bool) -> Network:
+    def _build_network(
+        self,
+        size: int,
+        seed: int,
+        canonical: bool,
+        evolved_map_path: str | None = None,
+    ) -> Network:
+        if evolved_map_path is not None:
+            return load_network_from_json(evolved_map_path)
         if canonical and size == 13:
             return build_canonical_13_network()
         return generate_network(seed, size=size, config=CONFIG)
@@ -177,7 +187,9 @@ class CyberStrikeApp:
         self._ai_reply_delay = 0.0
         self._spectator_timer = 0.0
 
-        network = self._build_network(cfg.map_size, cfg.seed, cfg.use_canonical_13)
+        network = self._build_network(
+            cfg.map_size, cfg.seed, cfg.use_canonical_13, cfg.evolved_map_path
+        )
         self.metas = compute_network_layout(network)
         self.state = new_game(network, CONFIG.game)
         self.sensor_rng = make_rng(cfg.seed, STREAM_SENSORS)
@@ -1105,14 +1117,16 @@ class CyberStrikeApp:
             self.setup_cfg.seed += 1
         elif bid == "setup_seed_rand":
             self.setup_cfg.seed = (self.setup_cfg.seed * 73 + 137) % 9999 + 1
+            self.setup_cfg.evolved_map_path = None
         elif bid.startswith("setup_preset_"):
             pid = bid.removeprefix("setup_preset_")
-            for preset in MAP_PRESETS:
+            for preset in all_map_presets():
                 if preset.id == pid:
                     self.setup_cfg.seed = preset.seed
                     self.setup_cfg.map_size = preset.node_count
                     self.setup_cfg.sector_name = preset.sector_code
                     self.setup_cfg.use_canonical_13 = preset.is_canonical_13
+                    self.setup_cfg.evolved_map_path = preset.evolved_map_path
                     break
         elif bid == "setup_start":
             self.show_tutorial = False
@@ -1122,7 +1136,7 @@ class CyberStrikeApp:
             self.screen_id = "main_menu"
         elif bid.startswith("maps_select_"):
             pid = bid.removeprefix("maps_select_")
-            for preset in MAP_PRESETS:
+            for preset in all_map_presets():
                 if preset.id == pid:
                     self.selected_map_preset = preset
                     break
@@ -1147,6 +1161,7 @@ class CyberStrikeApp:
                     map_size=p.node_count,
                     sector_name=p.sector_code,
                     use_canonical_13=p.is_canonical_13,
+                    evolved_map_path=p.evolved_map_path,
                 ),
                 target_screen=target,
             )

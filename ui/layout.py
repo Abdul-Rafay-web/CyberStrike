@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 import pygame
 
-from core.network import Edge, Network, bfs_distances
+from core.network import Edge, Network, bfs_distances, make_edge
+from utils.paths import DATA_DIR
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +36,53 @@ class MapPreset:
     badge: str
     description: str
     is_canonical_13: bool = False
+    evolved_map_path: str | None = None
+
+
+def load_network_from_json(path_str: str) -> Network:
+    """Load an evolved network JSON file saved in `data/maps/` without importing `evo`."""
+    payload = json.loads(Path(path_str).read_text(encoding="utf-8"))
+    edges = [make_edge(int(a), int(b)) for a, b in payload["edges"]]
+    hardness = [int(h) for h in payload["hardness"]]
+    return Network.from_edges(
+        int(payload["size"]),
+        edges,
+        hardness,
+        int(payload["entry"]),
+        int(payload["jewel"]),
+    )
+
+
+def all_map_presets() -> tuple[MapPreset, ...]:
+    """Return built-in map presets plus any GA-evolved maps exported in `data/maps/`."""
+    maps_dir = DATA_DIR / "maps"
+    extra: list[MapPreset] = []
+    if maps_dir.exists():
+        for idx, path in enumerate(sorted(maps_dir.glob("*.json")), start=1):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                name = str(payload.get("name", path.stem.upper()))
+                size = int(payload["size"])
+                fit = float(payload.get("fitness", 0.0))
+                win = float(payload.get("predicted_win_rate", 0.5))
+                extra.append(
+                    MapPreset(
+                        id=f"evolved_{path.stem}",
+                        name=name,
+                        sector_code=name,
+                        seed=idx,
+                        node_count=size,
+                        badge="GA EVOLVED",
+                        description=(
+                            f"Genetic Algorithm evolved {size}-node map "
+                            f"(fitness {fit:.2f}, predicted win rate {win:.0%})."
+                        ),
+                        evolved_map_path=str(path),
+                    )
+                )
+            except (KeyError, ValueError, OSError):
+                continue
+    return MAP_PRESETS + tuple(extra)
 
 
 MAP_PRESETS: tuple[MapPreset, ...] = (

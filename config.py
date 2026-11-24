@@ -66,6 +66,20 @@ class CSPConfig:
 
 
 @dataclass(frozen=True)
+class EvoConfig:
+    population_size: int = 24
+    generations: int = 40
+    tournament_size: int = 3
+    crossover_rate: float = 0.7
+    edge_mutation_rate: float = 0.35
+    hardness_mutation_rate: float = 0.35
+    elite_count: int = 4
+    regression_maps: int = 500
+    regression_trials: int = 12
+    export_count: int = 3
+
+
+@dataclass(frozen=True)
 class SearchConfig:
     max_depth_plies: int = 6
     time_budget_seconds: float = 2.0
@@ -105,6 +119,7 @@ class AppConfig:
     ml: MLConfig = field(default_factory=MLConfig)
     belief: BeliefConfig = field(default_factory=BeliefConfig)
     csp: CSPConfig = field(default_factory=CSPConfig)
+    evo: EvoConfig = field(default_factory=EvoConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     seeds: SeedConfig = field(default_factory=SeedConfig)
     theme: Theme = field(default_factory=Theme)
