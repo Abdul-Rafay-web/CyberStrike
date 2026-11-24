@@ -50,6 +50,7 @@ class SetupConfig:
     sector_name: str = "INTRA_NET_ALPHA_09"
     use_canonical_13: bool = True
     evolved_map_path: str | None = None
+    difficulty: Literal["easy", "standard", "hard"] = "standard"
 
 
 def _draw_network_preview(

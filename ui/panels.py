@@ -831,6 +831,8 @@ def draw_tutorial_card(
     side: Side,
     stage_label: str,
     hovered_id: str | None,
+    custom_title: str | None = None,
+    custom_hint: str | None = None,
 ) -> list[ButtonSpec]:
     """Render the Explainable Rules Tutorial banner describing current turn state."""
     draw_alpha_rect(
@@ -840,10 +842,11 @@ def draw_tutorial_card(
         border_rgba=with_alpha(palette.cyan, 160),
     )
     buttons: list[ButtonSpec] = []
+    badge_text = custom_title if custom_title else f"TUTORIAL COACH // {stage_label}"
     draw_badge_pill(
         surface,
         (rect.left + 12, rect.top + 6),
-        f"TUTORIAL COACH // {stage_label}",
+        badge_text,
         palette.cyan,
         with_alpha(palette.cyan, 50),
         with_alpha(palette.cyan, 200),
@@ -851,7 +854,9 @@ def draw_tutorial_card(
         centered=False,
     )
 
-    if side is Side.DEFENDER:
+    if custom_hint:
+        hint = custom_hint
+    elif side is Side.DEFENDER:
         hint = (
             f"Defender Turn {turn}: Watch noisy sensor alerts and protect Crown Jewel paths "
             "using Patch (+2 hardness), Firewall (cuts link), or hidden Honeypot (+2T delay)."
@@ -861,6 +866,8 @@ def draw_tutorial_card(
             f"Attacker Turn {turn}: Advance to an open neighbor. Multi-turn hardness holds "
             "the intruder in place until breach_left reaches 0."
         )
+    if len(hint) > 132:
+        hint = hint[:129] + "..."
     surface.blit(
         fonts.get("body", 14).render(hint, True, palette.text), (rect.left + 14, rect.top + 30)
     )

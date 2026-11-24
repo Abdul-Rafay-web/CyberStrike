@@ -22,7 +22,7 @@ from core.events import (
     network_from_started,
 )
 from core.network import Network
-from core.rules import apply, outcome, utility
+from core.rules import Outcome, apply, outcome, utility
 from core.state import GameState, Side, new_game
 
 
@@ -87,11 +87,12 @@ def build_events_from_steps(
             events.append(make_defense_placed(before.turn, action))
         final_state = after
     res = outcome(final_state, config)
-    events.append(
-        make_game_ended(
-            min(final_state.turn, config.turn_limit),
-            res,
-            utility(final_state, config),
+    if res is not Outcome.ONGOING:
+        events.append(
+            make_game_ended(
+                min(final_state.turn, config.turn_limit),
+                res,
+                utility(final_state, config),
+            )
         )
-    )
     return events

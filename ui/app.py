@@ -2,19 +2,35 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 import pygame
 
+from agents.base import AttackerAgent, DefenderAgent
 from agents.belief_defender import BeliefSession, create_belief_session
-from agents.random_agents import RandomAttacker, RandomDefender
+from agents.factory import (
+    attacker_telemetry_summary,
+    build_ai_tutorial_caption,
+    build_match_agents,
+    run_post_game_coach,
+)
 from config import CONFIG
 from core.actions import Action, Advance, Firewall, Honeypot, Pass, Patch
+from core.events import (
+    AttackerMoved,
+    DefensePlaced,
+    GameStarted,
+    attacker_event_to_action,
+    defense_event_to_action,
+    network_from_started,
+)
+from core.eventstore import EventStore, build_events_from_steps
 from core.generator import generate_network
 from core.network import Network, make_edge
 from core.observation import observe_attacker, observe_defender
 from core.rules import IllegalActionError, Outcome, apply, is_terminal, outcome, utility
-from core.sensors import sample_alerts
+from core.sensors import Sensor
 from core.state import GameState, Side, new_game
 from ui.battlefield import BattlefieldView, ToolMode, ViewMode
 from ui.draw import ButtonSpec
@@ -194,8 +210,12 @@ class CyberStrikeApp:
         self.state = new_game(network, CONFIG.game)
         self.sensor_rng = make_rng(cfg.seed, STREAM_SENSORS)
         agent_rng = make_rng(cfg.seed, STREAM_AGENTS)
-        self.ai_attacker = RandomAttacker(agent_rng)
-        self.ai_defender = RandomDefender(agent_rng)
+        bundle = build_match_agents(cfg.difficulty, agent_rng)
+        self.ai_attacker: AttackerAgent = bundle.attacker
+        self.ai_defender: DefenderAgent = bundle.defender
+        self.sensor: Sensor = bundle.sensor
+        self.recorded_steps: list[tuple[GameState, Action, GameState]] = []
+        self.coach_headline: str | None = None
 
         self.selected_node = network.entry
         self.battlefield.reset_animations(self.state.attacker_pos)
@@ -212,12 +232,12 @@ class CyberStrikeApp:
             ),
             AuditEntry(
                 1,
-                f"[T01] INTRUSION DETECTED AT {self.metas[network.entry].code}",
+                f"[T01] AI: {bundle.attacker_label} vs {bundle.defender_label}",
                 "info",
             ),
         ]
-        self.alerts: tuple[bool, ...] = sample_alerts(self.state, self.sensor_rng, CONFIG.sensors)
-        self.belief_session: BeliefSession = create_belief_session(network, CONFIG.sensors)
+        self.alerts: tuple[bool, ...] = self.sensor.alerts(self.state, self.sensor_rng)
+        self.belief_session: BeliefSession = create_belief_session(network, bundle.sensor_rates)
         self.belief: tuple[float, ...] = self.belief_session.probabilities
         self.history: list[HistoryFrame] = [
             HistoryFrame(self.state, self.alerts, list(self.logs), self.belief)
@@ -341,10 +361,11 @@ class CyberStrikeApp:
                 self.sfx.breach_step()
 
         self._log_action(before, action, after)
+        self.recorded_steps.append((before, action, after))
 
         # Sample fresh noisy sensor alerts when entering Defender turn
         if after.side is Side.DEFENDER and not is_terminal(after, CONFIG.game):
-            self.alerts = sample_alerts(after, self.sensor_rng, CONFIG.sensors)
+            self.alerts = self.sensor.alerts(after, self.sensor_rng)
             self.belief = self.belief_session.step(
                 observe_defender(after, self.alerts, CONFIG.game)
             )
@@ -365,15 +386,65 @@ class CyberStrikeApp:
             self.logs.append(
                 AuditEntry(after.turn, "OPERATION COMPLETE — DEFENDER VICTORY", "cyan")
             )
+            self._run_coach_summary()
         elif res is Outcome.ATTACKER_WINS:
             self.sfx.defeat()
             self.spectator_playing = False
             self.logs.append(
                 AuditEntry(after.turn, "CROWN JEWEL BREACHED — ATTACKER VICTORY", "red")
             )
+            self._run_coach_summary()
 
         self.history.append(HistoryFrame(self.state, self.alerts, list(self.logs), self.belief))
         self.replay_index = len(self.history) - 1
+        return True
+
+    def _run_coach_summary(self) -> None:
+        if not self.recorded_steps:
+            return
+        report = run_post_game_coach([(b, act) for b, act, _ in self.recorded_steps])
+        self.coach_headline = report.headline
+        self.logs.append(AuditEntry(self.state.turn, report.headline, "amber"))
+
+    def step_spectator_once(self) -> None:
+        """Advance Spectator AI-vs-AI mode by a single ply."""
+        self._execute_ai_ply()
+
+    def save_replay(self, path: Path) -> None:
+        """Write the current operation's event stream to an append-only JSONL replay file."""
+        if path.exists():
+            path.unlink()
+        events = build_events_from_steps(
+            self.active_seed, self.state.network, self.recorded_steps, CONFIG.game
+        )
+        EventStore(path).append_many(events)
+
+    def load_replay(self, path: Path) -> bool:
+        """Load a JSONL event-store replay and populate Replay Viewer frames."""
+        events = EventStore(path).read_all()
+        if not events or not isinstance(events[0], GameStarted):
+            return False
+        started = events[0]
+        net = network_from_started(started)
+        self.active_seed = started.seed
+        self.metas = compute_network_layout(net)
+        state = new_game(net, CONFIG.game)
+        alerts = (False,) * net.size
+        belief_sess = create_belief_session(net, CONFIG.sensors)
+        logs = [AuditEntry(1, f"[REPLAY] LOADED {path.name} (SEED #{started.seed})", "cyan")]
+        frames = [HistoryFrame(state, alerts, list(logs), belief_sess.probabilities)]
+        for ev in events[1:]:
+            if isinstance(ev, AttackerMoved):
+                state = apply(state, attacker_event_to_action(ev), CONFIG.game)
+                frames.append(HistoryFrame(state, alerts, list(logs), belief_sess.probabilities))
+            elif isinstance(ev, DefensePlaced):
+                state = apply(state, defense_event_to_action(ev), CONFIG.game)
+                frames.append(HistoryFrame(state, alerts, list(logs), belief_sess.probabilities))
+        self.state = state
+        self.history = frames
+        self.replay_index = 0
+        self.replay_playing = False
+        self.screen_id = "replay_viewer"
         return True
 
     def _execute_ai_ply(self) -> None:
@@ -741,6 +812,16 @@ class CyberStrikeApp:
 
         if self.show_tutorial:
             t_rect = pygame.Rect(12, top_y, w - 24, 54)
+            tut_title, tut_body = build_ai_tutorial_caption(
+                net_ref,
+                state.turn,
+                state.side,
+                frame.belief,
+                frame.alerts,
+                self.ai_attacker,
+                self.ai_defender,
+                tuple(m.code for m in self.metas),
+            )
             buttons.extend(
                 draw_tutorial_card(
                     surface,
@@ -752,6 +833,8 @@ class CyberStrikeApp:
                     state.side,
                     stage_label,
                     self._hovered_btn_id,
+                    custom_title=tut_title,
+                    custom_hint=tut_body,
                 )
             )
             top_y += 60
@@ -759,6 +842,7 @@ class CyberStrikeApp:
         tray_h = 26 if self.settings.show_diagnostics_tray else 0
         bottom_y = h - tray_h - 8
         if self.settings.show_diagnostics_tray:
+            diag_note = self.coach_headline or attacker_telemetry_summary(self.ai_attacker)
             draw_bottom_diagnostics_tray(
                 surface,
                 pygame.Rect(0, h - tray_h, w, tray_h),
@@ -771,6 +855,7 @@ class CyberStrikeApp:
                 self.active_seed,
                 self.plies,
                 fps_actual,
+                diagnostics_note=diag_note,
             )
 
         right_w = 304
